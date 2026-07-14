@@ -29,6 +29,46 @@ class FakeResponse(io.BytesIO):
         self.close()
 
 
+class AdapterTests(unittest.TestCase):
+    def test_postgresql_eu_schedule_url_can_be_discovered_from_event_site(self):
+        original_request_url = pgppt.request_url
+        try:
+            html = b"""
+            <html><body>
+              <a href="https://www.postgresql.eu/events/schedule/fosdem2026/">Schedule</a>
+            </body></html>
+            """
+            pgppt.request_url = lambda url: FakeResponse(html, "text/html")
+
+            self.assertEqual(
+                pgppt.postgresql_eu_schedule_url("https://2026.fosdempgday.org"),
+                "https://www.postgresql.eu/events/fosdem2026/schedule/",
+            )
+        finally:
+            pgppt.request_url = original_request_url
+
+    def test_discover_postgresql_eu_sessions(self):
+        original_request_url = pgppt.request_url
+        try:
+            html = b"""
+            <html><body>
+              <a href="session/7370-zero-downtime-upgrades-postgresql-and-osglibc-at-global-scale/">
+                Zero-Downtime Upgrades: PostgreSQL and OS/glibc at Global Scale
+              </a>
+              <a href="../../speaker/459-alexander-sosna/">Speaker</a>
+            </body></html>
+            """
+            pgppt.request_url = lambda url: FakeResponse(html, "text/html")
+
+            sessions = pgppt.discover_postgresql_eu_sessions("https://www.postgresql.eu/events/fosdem2026/schedule/")
+
+            self.assertEqual(len(sessions), 1)
+            self.assertEqual(sessions[0][0], "https://www.postgresql.eu/events/fosdem2026/schedule/session/7370-zero-downtime-upgrades-postgresql-and-osglibc-at-global-scale/")
+            self.assertEqual(sessions[0][1], "Zero-Downtime Upgrades: PostgreSQL and OS/glibc at Global Scale")
+        finally:
+            pgppt.request_url = original_request_url
+
+
 class ReportTests(unittest.TestCase):
     def test_duplicate_content_records_second_source_url(self):
         body = b"%PDF-1.4 same content\n"

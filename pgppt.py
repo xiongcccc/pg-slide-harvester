@@ -1300,6 +1300,98 @@ def crawl_pgevents(
     return messages
 
 
+def discover_postgresql_eu_sessions(schedule_url: str) -> list[tuple[str, str]]:
+    """Return (session_url, title) pairs from a PostgreSQL Europe schedule page."""
+    parsed_schedule = urlparse(schedule_url)
+    links = extract_links(schedule_url)
+    seen: set[str] = set()
+    sessions: list[tuple[str, str]] = []
+    for url, label in links:
+        parsed = urlparse(url)
+        if parsed.netloc != parsed_schedule.netloc:
+            continue
+        if not re.search(r"/events/[^/]+/schedule/session/\d+", parsed.path):
+            continue
+        normalized = parsed._replace(query="", fragment="").geturl()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        title = re.sub(r"\s+", " ", label).strip() or infer_session_title(normalized)
+        sessions.append((normalized, title))
+    return sessions
+
+
+def crawl_postgresql_eu(
+    conn: sqlite3.Connection,
+    schedule_url: str,
+    event_name: str | None = None,
+    delay_seconds: float = 0.5,
+    limit: int | None = None,
+) -> list[str]:
+    event = event_name or infer_event_name(schedule_url)
+    event_id = upsert_event(conn, event, source_url=schedule_url, website_url=schedule_url)
+    discovered = discover_postgresql_eu_sessions(schedule_url)
+    if limit is not None:
+        discovered = discovered[:limit]
+
+    messages = [f"discovered postgresql.eu sessions: {len(discovered)}"]
+    downloaded = 0
+    skipped = 0
+    missing = 0
+    failed = 0
+
+    for session_url, title in discovered:
+        session_id = upsert_session(conn, event_id, title, session_url=session_url, asset_status="missing")
+        try:
+            page_info = extract_page_info(session_url)
+            if page_info["abstract"]:
+                session_id = upsert_session(
+                    conn,
+                    event_id,
+                    title,
+                    session_url=session_url,
+                    asset_status="missing",
+                    abstract=str(page_info["abstract"]),
+                )
+            assets = [(url, label) for url, label in page_info["links"] if is_probably_slide_asset(url, label)]
+        except HTTPError as exc:
+            status = "login_required" if exc.code in (401, 403) else "failed"
+            mark_session_checked(conn, session_id, status)
+            failed += 1
+            messages.append(f"ERROR {title}: http error {exc.code}")
+            continue
+        except Exception as exc:  # noqa: BLE001
+            mark_session_checked(conn, session_id, "failed")
+            failed += 1
+            messages.append(f"ERROR {title}: {exc}")
+            continue
+
+        if not assets:
+            mark_session_checked(conn, session_id, "missing")
+            missing += 1
+            messages.append(f"WAIT {title}: no slides yet")
+            if delay_seconds:
+                time.sleep(delay_seconds)
+            continue
+
+        for asset_url, label in assets:
+            asset_title = asset_title_from_context(title, label, asset_url, len(assets))
+            ok, msg = download_asset(conn, session_id, asset_url, event, asset_title)
+            if ok:
+                downloaded += 1
+                messages.append(f"OK {title}: {msg}")
+            else:
+                skipped += 1
+                messages.append(f"SKIP {title}: {msg}")
+        if delay_seconds:
+            time.sleep(delay_seconds)
+
+    messages.append(
+        f"summary: downloaded={downloaded}, skipped={skipped}, missing={missing}, failed={failed}"
+    )
+    return messages
+
+
 def find_event(conn: sqlite3.Connection, event_query: str) -> tuple[sqlite3.Row | None, list[sqlite3.Row]]:
     exact = conn.execute(
         "select * from events where lower(name) = lower(?)",
@@ -1363,6 +1455,31 @@ def pgevents_sessions_url(url: str) -> str | None:
     return f"{parsed.scheme}://{parsed.netloc}/events/{event_slug}/sessions/"
 
 
+def postgresql_eu_schedule_url(url: str) -> str | None:
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    if host.endswith("postgresql.eu") or host.endswith("pgconf.eu"):
+        old_match = re.match(r"^/events/schedule/([^/]+)/?$", parsed.path)
+        if old_match:
+            return f"{parsed.scheme}://{parsed.netloc}/events/{old_match.group(1)}/schedule/"
+        if re.match(r"^/events/[^/]+/schedule/?$", parsed.path):
+            return parsed._replace(query="", fragment="").geturl()
+
+    try:
+        for link_url, label in extract_links(url):
+            link = urlparse(link_url)
+            link_host = link.netloc.lower()
+            text = f"{link_url} {label}".lower()
+            if not (link_host.endswith("postgresql.eu") or link_host.endswith("pgconf.eu")):
+                continue
+            if "/schedule/" not in link.path and "schedule" not in text:
+                continue
+            return postgresql_eu_schedule_url(link_url) or link._replace(query="", fragment="").geturl()
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 def classify_adapter_url(url: str) -> str:
     parsed = urlparse(url)
     host = parsed.netloc.lower()
@@ -1412,6 +1529,9 @@ def classify_event_row(row: sqlite3.Row, resolve: bool = False, probe_wordpress:
         candidate = classify_adapter_url(url)
         if candidate != "unknown" and candidate != "postgresql-official":
             return candidate, url
+        schedule_url = postgresql_eu_schedule_url(url)
+        if schedule_url:
+            return "postgresql-eu", schedule_url
 
     if probe_wordpress:
         for url, _label in urls:
@@ -1505,6 +1625,16 @@ def download_event_by_name(
             ran_adapter = True
             messages.append(f"adapter: pgevents ({label or url}) -> {sessions_url}")
             messages.extend(crawl_pgevents(conn, sessions_url, event_name, delay_seconds, limit))
+            continue
+
+        pgeu_schedule_url = postgresql_eu_schedule_url(url)
+        if pgeu_schedule_url and pgeu_schedule_url not in seen_targets:
+            seen_targets.add(pgeu_schedule_url)
+            ran_adapter = True
+            messages.append(f"adapter: postgresql-eu ({label or url}) -> {pgeu_schedule_url}")
+            messages.extend(crawl_postgresql_eu(conn, pgeu_schedule_url, event_name, delay_seconds, limit))
+            continue
+        if pgeu_schedule_url and pgeu_schedule_url in seen_targets:
             continue
 
         if classify_adapter_url(url) == "wordpress" and url not in seen_targets:
