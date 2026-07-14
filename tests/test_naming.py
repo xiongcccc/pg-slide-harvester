@@ -73,6 +73,23 @@ class NamingTests(unittest.TestCase):
             )
         )
 
+    def test_mcp_title_maps_to_extensions_ecosystem(self):
+        self.assertEqual(
+            pgppt.best_topic_slug_from_parts(["Creating a Dungeon Master with Postgres and MCP"]),
+            "extensions-ecosystem",
+        )
+
+    def test_training_and_contributor_titles_map_to_community(self):
+        self.assertEqual(
+            pgppt.best_topic_slug_from_parts(
+                [
+                    "Developer U Lessons Learned from a Global Training Program for Postgres Developers",
+                    "mentoring newcomers and PostgreSQL contributors",
+                ]
+            ),
+            "community",
+        )
+
     def test_upsert_session_can_backfill_abstract(self):
         conn = memory_conn(self)
         pgppt.init_db(conn)
@@ -175,6 +192,120 @@ class NamingTests(unittest.TestCase):
             pgppt.ROOT = original_root
             pgppt.request_url = original_request_url
 
+    def test_download_converts_github_blob_url_to_raw_pdf(self):
+        body = b"%PDF-1.4 github raw test\n"
+        original_root = pgppt.ROOT
+        original_request_url = pgppt.request_url
+        seen_urls = []
+
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                pgppt.ROOT = Path(tmp)
+
+                def fake_request_url(url):
+                    seen_urls.append(url)
+                    return FakeResponse(body, "application/octet-stream")
+
+                pgppt.request_url = fake_request_url
+                conn = memory_conn(self)
+                pgppt.init_db(conn)
+                pgppt.ensure_tags(conn)
+                event_id = pgppt.upsert_event(conn, "PG BootCamp Russia 2026")
+                session_id = pgppt.upsert_session(conn, event_id, "Download presentation")
+
+                ok, msg = pgppt.download_asset(
+                    conn,
+                    session_id,
+                    "https://github.com/PGBootCamp/Russia_2026/blob/main/T1-L1%20-%20Archive%20of%20the%20future.pdf",
+                    "PG BootCamp Russia 2026",
+                    "Download presentation",
+                )
+
+                self.assertTrue(ok, msg)
+                self.assertEqual(
+                    seen_urls,
+                    ["https://raw.githubusercontent.com/PGBootCamp/Russia_2026/main/T1-L1 - Archive of the future.pdf"],
+                )
+                row = conn.execute("select file_url, local_path from assets").fetchone()
+                self.assertEqual(
+                    row["file_url"],
+                    "https://raw.githubusercontent.com/PGBootCamp/Russia_2026/main/T1-L1 - Archive of the future.pdf",
+                )
+                self.assertEqual(row["local_path"], "archive/backup-recovery/Download presentation.pdf")
+        finally:
+            pgppt.ROOT = original_root
+            pgppt.request_url = original_request_url
+
+    def test_download_rejects_html_saved_as_pdf(self):
+        original_root = pgppt.ROOT
+        original_request_url = pgppt.request_url
+
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                pgppt.ROOT = Path(tmp)
+                pgppt.request_url = lambda url: FakeResponse(b"<html>not a pdf</html>", "text/html")
+                conn = memory_conn(self)
+                pgppt.init_db(conn)
+                pgppt.ensure_tags(conn)
+                event_id = pgppt.upsert_event(conn, "PG BootCamp Russia 2026")
+                session_id = pgppt.upsert_session(conn, event_id, "Archive of the future")
+
+                ok, msg = pgppt.download_asset(
+                    conn,
+                    session_id,
+                    "https://example.org/archive-of-the-future.pdf",
+                    "PG BootCamp Russia 2026",
+                    "Archive of the future",
+                )
+
+                self.assertFalse(ok)
+                self.assertIn("unexpected asset content-type=text/html", msg)
+                self.assertIsNone(conn.execute("select id from assets").fetchone())
+                self.assertFalse(list((pgppt.ROOT / "archive").rglob("*.pdf")))
+        finally:
+            pgppt.ROOT = original_root
+            pgppt.request_url = original_request_url
+
+    def test_asset_filename_contributes_to_classification(self):
+        conn = memory_conn(self)
+        pgppt.init_db(conn)
+        pgppt.ensure_tags(conn)
+        event_id = pgppt.upsert_event(conn, "PGConf.BE 2026")
+        session_id = pgppt.upsert_session(conn, event_id, "Directory Tree", abstract="Directory Tree")
+        conn.execute(
+            """
+            insert into assets(
+                session_id, file_url, local_path, file_type, sha256,
+                size_bytes, downloaded_at, created_at
+            )
+            values(?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                "https://pgconf.be/presentations/The_Wonderful_World_of_Wal.B.Momjian.eng.pdf",
+                "archive/uncategorized/Directory Tree - The Wonderful World of Wal.B.Momjian.eng.pdf",
+                "pdf",
+                "walsha",
+                123,
+                pgppt.utcnow(),
+                pgppt.utcnow(),
+            ),
+        )
+        conn.commit()
+
+        pgppt.classify_session(conn, session_id)
+
+        rows = conn.execute(
+            """
+            select t.slug
+            from session_tags st join tags t on t.id = st.tag_id
+            where st.session_id = ?
+            order by t.slug
+            """,
+            (session_id,),
+        ).fetchall()
+        self.assertIn("internals", [row["slug"] for row in rows])
+
     def test_organize_archive_flattens_topic_directory_and_normalizes_filename(self):
         original_root = pgppt.ROOT
 
@@ -222,6 +353,54 @@ class NamingTests(unittest.TestCase):
                 self.assertEqual(row["local_path"], "archive/optimizer/Update on index prefetching.pdf")
                 self.assertTrue((pgppt.ROOT / row["local_path"]).exists(), messages)
                 self.assertFalse(old_path.exists())
+        finally:
+            pgppt.ROOT = original_root
+
+    def test_organize_archive_uses_asset_filename_for_directory_tree(self):
+        original_root = pgppt.ROOT
+
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                pgppt.ROOT = Path(tmp)
+                old_path = pgppt.ROOT / "archive/uncategorized/Directory Tree - The Wonderful World of Wal.B.Momjian.eng.pdf"
+                old_path.parent.mkdir(parents=True)
+                old_path.write_bytes(b"%PDF-1.4 wal\n")
+
+                conn = memory_conn(self)
+                pgppt.init_db(conn)
+                pgppt.ensure_tags(conn)
+                event_id = pgppt.upsert_event(conn, "PGConf.BE 2026")
+                session_id = pgppt.upsert_session(conn, event_id, "Directory Tree", abstract="Directory Tree")
+                conn.execute(
+                    """
+                    insert into assets(
+                        session_id, file_url, local_path, file_type, sha256,
+                        size_bytes, downloaded_at, created_at
+                    )
+                    values(?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        session_id,
+                        "https://pgconf.be/presentations/The_Wonderful_World_of_Wal.B.Momjian.eng.pdf",
+                        "archive/uncategorized/Directory Tree - The Wonderful World of Wal.B.Momjian.eng.pdf",
+                        "pdf",
+                        "walsha",
+                        old_path.stat().st_size,
+                        pgppt.utcnow(),
+                        pgppt.utcnow(),
+                    ),
+                )
+                conn.commit()
+
+                messages = pgppt.organize_archive_by_topic(conn)
+
+                row = conn.execute("select local_path from assets").fetchone()
+                self.assertEqual(
+                    row["local_path"],
+                    "archive/internals/The Wonderful World of Wal.B.Momjian.eng.pdf",
+                )
+                self.assertTrue((pgppt.ROOT / row["local_path"]).exists())
+                self.assertTrue(any("MOVE archive/uncategorized/Directory Tree" in msg for msg in messages))
         finally:
             pgppt.ROOT = original_root
 

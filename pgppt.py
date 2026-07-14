@@ -96,15 +96,29 @@ WINDOWS_RESERVED_FILENAMES = {
     "LPT9",
 }
 GENERIC_ASSET_LABELS = {
+    "directory tree",
     "download",
+    "download presentation",
     "download slides",
     "download the slides",
     "presentation",
     "presentations",
+    "скачать презентацию",
     "slides",
     "slides pdf",
     "view slides",
 }
+TITLE_NOISE_PATTERNS = (
+    "discord icon",
+    "linkedin icon",
+    "mastodon icon",
+    "microsoft logo",
+    "play icon",
+    "talk bubbles",
+    "x icon",
+    "bsky icon",
+    "elephant icon",
+)
 UNCATEGORIZED_TOPIC = "uncategorized"
 BLOCK_TEXT_TAGS = {"p", "li", "h1", "h2", "h3"}
 ACTIVE_RUN_ID: int | None = None
@@ -154,13 +168,35 @@ def safe_filename_stem(value: str | None, fallback: str = "untitled", max_length
     return value or fallback
 
 
+def title_has_noise(value: str) -> bool:
+    lowered = value.lower()
+    return any(pattern in lowered for pattern in TITLE_NOISE_PATTERNS)
+
+
+def normalized_asset_url(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.netloc.lower() == "github.com":
+        parts = [unquote(part) for part in parsed.path.split("/") if part]
+        if len(parts) >= 5 and parts[2] == "blob":
+            owner, repo, _blob, branch = parts[:4]
+            path = "/".join(parts[4:])
+            return f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
+    return url
+
+
 def asset_title_from_context(base_title: str, label: str, asset_url: str, asset_count: int) -> str:
     base = readable_text(base_title) or infer_session_title(asset_url)
+    base_lower = base.lower()
     if asset_count <= 1:
+        inferred = readable_text(infer_session_title(asset_url))
+        if base_lower in GENERIC_ASSET_LABELS or title_has_noise(base):
+            return inferred or base
         return base
 
     label_text = readable_text(label)
     inferred = readable_text(infer_session_title(asset_url))
+    if base_lower in GENERIC_ASSET_LABELS or title_has_noise(base):
+        return inferred or label_text or base
     extra = label_text
     if not extra or extra.lower() in GENERIC_ASSET_LABELS:
         extra = inferred
@@ -588,6 +624,45 @@ def primary_topic_slug(conn: sqlite3.Connection, session_id: int) -> str:
     return row["slug"] if row else UNCATEGORIZED_TOPIC
 
 
+def best_topic_slug_from_parts(parts: Iterable[str]) -> str:
+    text = " ".join(readable_text(part) for part in parts if part).lower()
+    if not text:
+        return UNCATEGORIZED_TOPIC
+    categories = load_json(CATEGORIES_PATH, {})
+    best_slug = UNCATEGORIZED_TOPIC
+    best_score = 0
+    for slug, item in categories.items():
+        score = sum(1 for keyword in item.get("keywords", []) if keyword_matches(text, keyword))
+        if score > best_score:
+            best_slug = slug
+            best_score = score
+    return best_slug if best_score else UNCATEGORIZED_TOPIC
+
+
+def asset_topic_slug(
+    conn: sqlite3.Connection,
+    session_id: int,
+    asset_title: str,
+    file_url: str,
+) -> str:
+    primary = best_topic_slug_from_parts([asset_title, infer_session_title(file_url)])
+    if primary != UNCATEGORIZED_TOPIC:
+        return primary
+    row = conn.execute(
+        "select title, abstract from sessions where id = ?",
+        (session_id,),
+    ).fetchone()
+    parts: list[str] = []
+    if row:
+        session_title = readable_text(row["title"] or "")
+        abstract = readable_text(row["abstract"] or "")
+        if session_title.lower() not in GENERIC_ASSET_LABELS and not title_has_noise(session_title):
+            parts.append(session_title)
+        if abstract.lower() not in GENERIC_ASSET_LABELS and not title_has_noise(abstract):
+            parts.append(abstract)
+    return best_topic_slug_from_parts(parts)
+
+
 def unique_asset_path(dest_dir: Path, filename_stem: str, ext: str) -> Path:
     dest = dest_dir / f"{filename_stem}{ext}"
     counter = 2
@@ -595,6 +670,27 @@ def unique_asset_path(dest_dir: Path, filename_stem: str, ext: str) -> Path:
         dest = dest_dir / f"{filename_stem}-{counter}{ext}"
         counter += 1
     return dest
+
+
+def generic_title(value: str) -> bool:
+    normalized = readable_text(value).lower()
+    return normalized in GENERIC_ASSET_LABELS or title_has_noise(normalized)
+
+
+def preferred_asset_stem(local_path: str, file_url: str, session_title: str) -> str:
+    local_stem = safe_filename_stem(Path(local_path or "").stem, fallback="")
+    inferred = safe_filename_stem(infer_session_title(file_url or ""), fallback="")
+    session_stem = safe_filename_stem(session_title, fallback="")
+
+    if local_stem.lower().startswith("directory tree - "):
+        return safe_filename_stem(local_stem.split(" - ", 1)[1], fallback=local_stem)
+    if generic_title(local_stem) and inferred:
+        return inferred
+    if title_has_noise(local_stem) and inferred:
+        return inferred
+    if session_stem.lower() in GENERIC_ASSET_LABELS and inferred:
+        return inferred
+    return local_stem or inferred or session_stem or "untitled"
 
 
 def sha256_file(path: Path) -> str:
@@ -605,6 +701,24 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def asset_content_error(path: Path, ext: str, content_type: str) -> str | None:
+    lowered_type = (content_type or "").lower()
+    if any(marker in lowered_type for marker in ("text/html", "application/xhtml", "text/plain")):
+        return f"unexpected asset content-type={content_type or 'unknown'}"
+    with path.open("rb") as f:
+        header = f.read(8)
+    lowered_ext = ext.lower()
+    if lowered_ext == ".pdf" and not header.startswith(b"%PDF"):
+        return "invalid pdf header"
+    if lowered_ext in {".pptx", ".odp"} and not header.startswith(b"PK"):
+        return f"invalid {lowered_ext.lstrip('.')} header"
+    if lowered_ext == ".ppt" and not (
+        header.startswith(b"\xd0\xcf\x11\xe0") or header.startswith(b"PK")
+    ):
+        return "invalid ppt header"
+    return None
+
+
 def download_asset(
     conn: sqlite3.Connection,
     session_id: int,
@@ -612,6 +726,7 @@ def download_asset(
     event_name: str,
     session_title: str,
 ) -> tuple[bool, str]:
+    url = normalized_asset_url(url)
     classify_session(conn, session_id)
     existing_asset_id: int | None = None
     existing = conn.execute("select id, local_path, session_id from assets where file_url = ?", (url,)).fetchone()
@@ -644,13 +759,17 @@ def download_asset(
             ext = guess_extension(url, content_type)
             if ext.lower() not in ASSET_EXTENSIONS and "pdf" not in content_type.lower():
                 return False, f"skipped non-slide asset content-type={content_type}"
-            topic_dir = safe_topic_dir(primary_topic_slug(conn, session_id))
+            topic_dir = safe_topic_dir(asset_topic_slug(conn, session_id, session_title, url))
             topic_dir.mkdir(parents=True, exist_ok=True)
             filename_stem = safe_filename_stem(session_title)
             dest = unique_asset_path(topic_dir, filename_stem, ext)
             with tempfile.NamedTemporaryFile(delete=False, dir=str(topic_dir)) as tmp:
                 tmp_path = Path(tmp.name)
                 shutil.copyfileobj(resp, tmp)
+            if error := asset_content_error(tmp_path, ext, content_type):
+                tmp_path.unlink(missing_ok=True)
+                mark_session_checked(conn, session_id, "failed", message=error, source_url=url)
+                return False, error
         tmp_path.replace(dest)
     except HTTPError as exc:
         mark_session_checked(conn, session_id, "login_required" if exc.code in (401, 403) else "failed")
@@ -764,6 +883,26 @@ def keyword_matches(text: str, keyword: str) -> bool:
     return keyword in text
 
 
+def asset_signal_parts(conn: sqlite3.Connection, session_id: int) -> list[str]:
+    rows = conn.execute(
+        """
+        select local_path, file_url
+        from assets
+        where session_id = ?
+        """,
+        (session_id,),
+    ).fetchall()
+    parts: list[str] = []
+    for row in rows:
+        local_name = Path(row["local_path"] or "").stem
+        if local_name:
+            parts.append(local_name)
+        inferred = infer_session_title(row["file_url"] or "")
+        if inferred:
+            parts.append(inferred)
+    return parts
+
+
 def classify_session(conn: sqlite3.Connection, session_id: int) -> None:
     row = conn.execute(
         """
@@ -778,27 +917,36 @@ def classify_session(conn: sqlite3.Connection, session_id: int) -> None:
     conn.execute("delete from session_tags where session_id = ?", (session_id,))
     title_text = (row["title"] or "").lower()
     abstract_text = (row["abstract"] or "").lower()
+    asset_text = " ".join(asset_signal_parts(conn, session_id)).lower()
     categories = load_json(CATEGORIES_PATH, {})
     for slug, item in categories.items():
         abstract_hits = []
         title_hits = []
+        asset_hits = []
         for keyword in item.get("keywords", []):
             if keyword_matches(abstract_text, keyword):
                 abstract_hits.append(keyword)
             elif keyword_matches(title_text, keyword):
                 title_hits.append(keyword)
-        hits = abstract_hits + title_hits
+            elif keyword_matches(asset_text, keyword):
+                asset_hits.append(keyword)
+        hits = abstract_hits + title_hits + asset_hits
         if not hits:
             continue
         tag = conn.execute("select id from tags where slug = ?", (slug,)).fetchone()
         if not tag:
             continue
-        confidence = min(1.0, 0.35 + len(abstract_hits) * 0.22 + len(title_hits) * 0.1)
+        confidence = min(
+            1.0,
+            0.35 + len(abstract_hits) * 0.22 + len(title_hits) * 0.1 + len(asset_hits) * 0.08,
+        )
         reason_parts = []
         if abstract_hits:
             reason_parts.append("abstract: " + ", ".join(abstract_hits[:6]))
         if title_hits:
             reason_parts.append("title: " + ", ".join(title_hits[:6]))
+        if asset_hits:
+            reason_parts.append("asset: " + ", ".join(asset_hits[:6]))
         conn.execute(
             """
             insert into session_tags(session_id, tag_id, confidence, reason)
@@ -2080,7 +2228,12 @@ def tick(conn: sqlite3.Connection, limit: int) -> list[str]:
 def organize_archive_by_topic(conn: sqlite3.Connection) -> list[str]:
     rows = conn.execute(
         """
-        select a.id as asset_id, a.local_path, s.id as session_id, s.title as session_title
+        select
+            a.id as asset_id,
+            a.local_path,
+            a.file_url,
+            s.id as session_id,
+            s.title as session_title
         from assets a
         join sessions s on s.id = a.session_id
         order by a.downloaded_at
@@ -2096,9 +2249,10 @@ def organize_archive_by_topic(conn: sqlite3.Connection) -> list[str]:
             missing += 1
             messages.append(f"MISS {row['local_path']}")
             continue
-        topic_dir = safe_topic_dir(primary_topic_slug(conn, int(row["session_id"])))
+        stem = preferred_asset_stem(row["local_path"], row["file_url"], row["session_title"])
+        topic_slug = asset_topic_slug(conn, int(row["session_id"]), stem, row["file_url"])
+        topic_dir = safe_topic_dir(topic_slug)
         topic_dir.mkdir(parents=True, exist_ok=True)
-        stem = safe_filename_stem(row["session_title"])
         preferred_dest = topic_dir / f"{stem}{src.suffix}"
         if src.resolve() == preferred_dest.resolve():
             continue

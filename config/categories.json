@@ -11,10 +11,14 @@
       "selectivity",
       "cardinality",
       "join order",
+      "query optimization",
       "semi join",
       "semi joins",
       "semi-join",
       "semijoin",
+      "optimizers",
+      "index prefetching",
+      "prefetching",
       "explain",
       "plan"
     ]
@@ -32,7 +36,8 @@
       "nested loop",
       "sort",
       "node",
-      "tuple"
+      "tuple",
+      "intrinsics"
     ]
   },
   "streaming-replication": {
@@ -44,6 +49,7 @@
       "wal receiver",
       "walsender",
       "walreceiver",
+      "streaming",
       "standby",
       "hot standby",
       "primary",
@@ -89,7 +95,10 @@
       "switchover",
       "patroni",
       "repmgr",
+      "sharding",
       "cluster",
+      "active active",
+      "active-active",
       "resiliency",
       "availability",
       "disaster recovery"
@@ -105,9 +114,17 @@
       "tuning",
       "profiling",
       "bottleneck",
+      "load",
       "index",
       "indexing",
-      "query performance"
+      "global index",
+      "global indexes",
+      "query performance",
+      "percentile",
+      "percentiles",
+      "histogram",
+      "histograms",
+      "scaling"
     ]
   },
   "operations": {
@@ -119,10 +136,23 @@
       "autovacuum",
       "maintenance",
       "upgrade",
+      "upgrades",
       "migration",
+      "migrating",
       "operations",
       "sre",
-      "alerting"
+      "alerting",
+      "zero downtime",
+      "zero-downtime",
+      "maintaining",
+      "log",
+      "logs",
+      "logging",
+      "pg_stat_statements",
+      "pg stat statements",
+      "queue",
+      "queues",
+      "cache"
     ]
   },
   "storage": {
@@ -137,7 +167,11 @@
       "freezing",
       "visibility map",
       "fsm",
-      "checkpoint"
+      "checkpoint",
+      "collation",
+      "collations",
+      "temporary table",
+      "temporary tables"
     ]
   },
   "internals": {
@@ -149,10 +183,17 @@
       "lock manager",
       "wal",
       "transaction",
+      "isolation",
       "snapshot",
       "concurrency",
       "backend",
-      "shared memory"
+      "shared memory",
+      "parser",
+      "deparser",
+      "protocol",
+      "fe be",
+      "frontend backend",
+      "pg_query"
     ]
   },
   "extensions-ecosystem": {
@@ -165,7 +206,34 @@
       "fdw",
       "foreign data wrapper",
       "ecosystem",
-      "foreign table"
+      "foreign table",
+      "citus",
+      "wasm",
+      "mcp",
+      "model context protocol"
+    ]
+  },
+  "community": {
+    "label": "社区与培训",
+    "keywords": [
+      "community",
+      "contributor",
+      "contributors",
+      "contributing",
+      "developer u",
+      "developer training",
+      "training program",
+      "mentoring",
+      "mentor",
+      "newcomer",
+      "newcomers",
+      "onboarding",
+      "curriculum",
+      "teaching postgres",
+      "teaching postgresql",
+      "field engineers",
+      "my journey",
+      "lessons learned"
     ]
   },
   "cloud-native": {
@@ -189,6 +257,8 @@
       "authentication",
       "authorization",
       "encryption",
+      "tde",
+      "securing",
       "ssl",
       "tls",
       "audit",
