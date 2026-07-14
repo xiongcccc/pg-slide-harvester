@@ -1392,6 +1392,170 @@ def crawl_postgresql_eu(
     return messages
 
 
+def eventyay_event_url(url: str) -> str | None:
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    if host == "eventyay.com":
+        match = re.match(r"^/(?:e|ev)/([^/]+)/?", parsed.path)
+        if match:
+            return f"{parsed.scheme}://{parsed.netloc}/ev/{match.group(1)}/"
+
+    try:
+        probe_url = url
+        if host.endswith("summit.fossasia.org") and "pgday-sponsorship" in parsed.path:
+            probe_url = f"{parsed.scheme}://{parsed.netloc}/"
+        text = read_url_text(probe_url)
+    except Exception:  # noqa: BLE001
+        return None
+
+    refresh_match = re.search(r'http-equiv=["\']refresh["\'][^>]+content=["\'][^"\']*url=([^"\'>]+)', text, flags=re.IGNORECASE)
+    if refresh_match:
+        refreshed = urljoin(probe_url, html.unescape(refresh_match.group(1)).strip())
+        parsed_refreshed = urlparse(refreshed)
+        if parsed_refreshed.netloc.lower() == "eventyay.com":
+            return eventyay_event_url(refreshed)
+
+    for link_url, _label in parse_html_page(probe_url, text)["links"]:
+        parsed_link = urlparse(link_url)
+        if parsed_link.netloc.lower() == "eventyay.com":
+            resolved = eventyay_event_url(link_url)
+            if resolved:
+                return resolved
+    return None
+
+
+def extract_eventyay_schedule_data(event_url: str) -> dict[str, object]:
+    text = read_url_text(event_url)
+    match = re.search(
+        r'<script[^>]+id=["\']pretalx-schedule-data["\'][^>]*>(.*?)</script>',
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if not match:
+        return {}
+    return json.loads(html.unescape(match.group(1)).strip())
+
+
+def eventyay_session_url(event_url: str, talk: dict[str, object]) -> str:
+    code = str(talk.get("code") or "").strip()
+    if code:
+        return urljoin(event_url, f"talk/{quote(code)}/")
+    talk_id = str(talk.get("id") or "").strip()
+    return urljoin(event_url, f"talk/{quote(talk_id)}/") if talk_id else event_url
+
+
+def eventyay_track_name(track: dict[str, object]) -> str:
+    name = track.get("name", "")
+    if isinstance(name, dict):
+        return readable_text(str(name.get("en") or next(iter(name.values()), "")))
+    return readable_text(str(name))
+
+
+def value_asset_links(value, base_url: str) -> list[tuple[str, str]]:
+    links: list[tuple[str, str]] = []
+    if isinstance(value, dict):
+        for child in value.values():
+            links.extend(value_asset_links(child, base_url))
+    elif isinstance(value, list):
+        for child in value:
+            links.extend(value_asset_links(child, base_url))
+    elif isinstance(value, str):
+        for match in re.finditer(r"https?://[^\s\"'<>]+|/[^\s\"'<>]+", value):
+            candidate = urljoin(base_url, html.unescape(match.group(0)).rstrip(").,;"))
+            if is_probably_slide_asset(candidate):
+                links.append((candidate, Path(urlparse(candidate).path).name))
+    return links
+
+
+def discover_eventyay_sessions(event_url: str) -> list[dict[str, object]]:
+    data = extract_eventyay_schedule_data(event_url)
+    talks = data.get("talks", [])
+    tracks = data.get("tracks", [])
+    if not isinstance(talks, list):
+        return []
+    track_names = {track.get("id"): eventyay_track_name(track) for track in tracks if isinstance(track, dict)}
+    preferred_track_ids = {
+        track_id
+        for track_id, name in track_names.items()
+        if any(keyword in name.lower() for keyword in ("pgday", "postgres", "database"))
+    }
+    sessions: list[dict[str, object]] = []
+    for talk in talks:
+        if not isinstance(talk, dict):
+            continue
+        track_id = talk.get("track")
+        title = readable_text(str(talk.get("title") or ""))
+        abstract = readable_text(re.sub(r"<[^>]+>", " ", str(talk.get("abstract") or "")))
+        text = f"{title} {abstract} {track_names.get(track_id, '')}".lower()
+        if preferred_track_ids:
+            if track_id not in preferred_track_ids:
+                continue
+        elif not any(keyword in text for keyword in ("postgres", "postgresql", "pgday")):
+            continue
+        sessions.append(
+            {
+                "title": title or infer_session_title(event_url),
+                "abstract": abstract,
+                "session_url": eventyay_session_url(event_url, talk),
+                "assets": value_asset_links(talk, event_url),
+            }
+        )
+    return sessions
+
+
+def crawl_eventyay(
+    conn: sqlite3.Connection,
+    event_url: str,
+    event_name: str | None = None,
+    delay_seconds: float = 0.5,
+    limit: int | None = None,
+) -> list[str]:
+    event = event_name or infer_event_name(event_url)
+    event_id = upsert_event(conn, event, source_url=event_url, website_url=event_url)
+    sessions = discover_eventyay_sessions(event_url)
+    if limit is not None:
+        sessions = sessions[:limit]
+
+    messages = [f"discovered eventyay sessions: {len(sessions)}"]
+    downloaded = 0
+    skipped = 0
+    missing = 0
+    failed = 0
+
+    for session in sessions:
+        title = str(session["title"])
+        session_id = upsert_session(
+            conn,
+            event_id,
+            title,
+            session_url=str(session["session_url"]),
+            asset_status="missing",
+            abstract=str(session.get("abstract") or ""),
+        )
+        assets = list(session.get("assets") or [])
+        if not assets:
+            mark_session_checked(conn, session_id, "missing")
+            missing += 1
+            messages.append(f"WAIT {title}: no slides yet")
+            continue
+        for asset_url, label in assets:
+            asset_title = asset_title_from_context(title, label, asset_url, len(assets))
+            ok, msg = download_asset(conn, session_id, asset_url, event, asset_title)
+            if ok:
+                downloaded += 1
+                messages.append(f"OK {title}: {msg}")
+            else:
+                skipped += 1
+                messages.append(f"SKIP {title}: {msg}")
+        if delay_seconds:
+            time.sleep(delay_seconds)
+
+    messages.append(
+        f"summary: downloaded={downloaded}, skipped={skipped}, missing={missing}, failed={failed}"
+    )
+    return messages
+
+
 def find_event(conn: sqlite3.Connection, event_query: str) -> tuple[sqlite3.Row | None, list[sqlite3.Row]]:
     exact = conn.execute(
         "select * from events where lower(name) = lower(?)",
@@ -1491,6 +1655,8 @@ def classify_adapter_url(url: str) -> str:
         return "pgevents"
     if host.endswith("postgresql.eu") or host.endswith("pgconf.eu"):
         return "postgresql-eu"
+    if host == "eventyay.com":
+        return "eventyay"
     if host.endswith("pghyd.in"):
         return "wordpress"
     return "unknown"
@@ -1532,6 +1698,9 @@ def classify_event_row(row: sqlite3.Row, resolve: bool = False, probe_wordpress:
         schedule_url = postgresql_eu_schedule_url(url)
         if schedule_url:
             return "postgresql-eu", schedule_url
+        eventyay_url = eventyay_event_url(url)
+        if eventyay_url:
+            return "eventyay", eventyay_url
 
     if probe_wordpress:
         for url, _label in urls:
@@ -1635,6 +1804,16 @@ def download_event_by_name(
             messages.extend(crawl_postgresql_eu(conn, pgeu_schedule_url, event_name, delay_seconds, limit))
             continue
         if pgeu_schedule_url and pgeu_schedule_url in seen_targets:
+            continue
+
+        eventyay_url = eventyay_event_url(url)
+        if eventyay_url and eventyay_url not in seen_targets:
+            seen_targets.add(eventyay_url)
+            ran_adapter = True
+            messages.append(f"adapter: eventyay ({label or url}) -> {eventyay_url}")
+            messages.extend(crawl_eventyay(conn, eventyay_url, event_name, delay_seconds, limit))
+            continue
+        if eventyay_url and eventyay_url in seen_targets:
             continue
 
         if classify_adapter_url(url) == "wordpress" and url not in seen_targets:

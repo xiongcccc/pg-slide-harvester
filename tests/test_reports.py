@@ -30,6 +30,66 @@ class FakeResponse(io.BytesIO):
 
 
 class AdapterTests(unittest.TestCase):
+    def test_eventyay_event_url_can_be_discovered_from_sponsorship_page(self):
+        original_request_url = pgppt.request_url
+        try:
+            def fake_request(url):
+                if url == "https://summit.fossasia.org/":
+                    return FakeResponse(
+                        b'<meta http-equiv="refresh" content="0; url=https://eventyay.com/e/88882f3e" />',
+                        "text/html",
+                    )
+                return FakeResponse(b"", "text/html")
+
+            pgppt.request_url = fake_request
+
+            self.assertEqual(
+                pgppt.eventyay_event_url("https://summit.fossasia.org/pgday-sponsorship"),
+                "https://eventyay.com/ev/88882f3e/",
+            )
+        finally:
+            pgppt.request_url = original_request_url
+
+    def test_discover_eventyay_sessions_filters_pgday_track(self):
+        original_request_url = pgppt.request_url
+        try:
+            payload = {
+                "tracks": [
+                    {"id": 562, "name": {"en": "PGDay"}},
+                    {"id": 560, "name": {"en": "AI"}},
+                ],
+                "talks": [
+                    {
+                        "id": 1,
+                        "code": "PG1",
+                        "title": "PostgreSQL Backup Patterns",
+                        "abstract": "<p>Backup and recovery.</p>",
+                        "track": 562,
+                    },
+                    {
+                        "id": 2,
+                        "code": "AI1",
+                        "title": "General AI Talk",
+                        "abstract": "Not PG.",
+                        "track": 560,
+                    },
+                ],
+            }
+            html = (
+                '<script id="pretalx-schedule-data" type="application/json">'
+                + __import__("json").dumps(payload)
+                + "</script>"
+            ).encode()
+            pgppt.request_url = lambda url: FakeResponse(html, "text/html")
+
+            sessions = pgppt.discover_eventyay_sessions("https://eventyay.com/ev/88882f3e/")
+
+            self.assertEqual(len(sessions), 1)
+            self.assertEqual(sessions[0]["title"], "PostgreSQL Backup Patterns")
+            self.assertEqual(sessions[0]["session_url"], "https://eventyay.com/ev/88882f3e/talk/PG1/")
+        finally:
+            pgppt.request_url = original_request_url
+
     def test_postgresql_eu_schedule_url_can_be_discovered_from_event_site(self):
         original_request_url = pgppt.request_url
         try:
