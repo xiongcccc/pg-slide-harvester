@@ -60,11 +60,11 @@ python3 pgppt.py report
 
 常用目录：
 
-- `archive/by_topic/optimizer/`：优化器相关资料。
-- `archive/by_topic/executor/`：执行器相关资料。
-- `archive/by_topic/streaming-replication/`：流复制相关资料。
-- `archive/by_topic/backup-recovery/`：备份恢复相关资料。
-- `archive/by_topic/uncategorized/`：暂未命中分类的资料。
+- `archive/optimizer/`：优化器相关资料。
+- `archive/executor/`：执行器相关资料。
+- `archive/streaming-replication/`：流复制相关资料。
+- `archive/backup-recovery/`：备份恢复相关资料。
+- `archive/uncategorized/`：暂未命中分类的资料。
 - `data/pgppt.sqlite`：本地 SQLite 状态库。
 - `reports/index.html`：本地 HTML 报告。
 - `reports/index.csv`：CSV 报告。
@@ -108,7 +108,7 @@ python3 pgppt.py list sessions
 
 ### 主题分类策略
 
-下载资料会进入 `archive/by_topic/<category>/`，而不是按会议分散保存。
+下载资料会进入 `archive/<category>/`，而不是按会议分散保存。
 分类优先使用 session 页面或会议系统中的简介/摘要，其次才使用标题作为辅助信号。
 会议名称不会参与关键词打分，避免把整场会议误判成某一个主题。
 
@@ -122,7 +122,7 @@ python3 pgppt.py list sessions
 - `high-availability`：高可用、failover、Patroni、repmgr、disaster recovery 等。
 - 以及 `performance`、`operations`、`storage`、`internals`、`extensions-ecosystem`、`cloud-native`、`security`。
 
-未命中分类的资料会放入 `archive/by_topic/uncategorized/`，后续可以通过完善
+未命中分类的资料会放入 `archive/uncategorized/`，后续可以通过完善
 `config/categories.json` 再运行：
 
 ```bash
@@ -138,6 +138,7 @@ python3 pgppt.py organize-archive
 
 ```text
 Semi Joins in Postgres.pdf
+Update on index prefetching.pdf
 PostgreSQL Backup Patterns - Demo Notes.pdf
 ```
 
@@ -233,11 +234,11 @@ python3 pgppt.py report
 
 Generated local artifacts:
 
-- `archive/by_topic/optimizer/`: optimizer-related materials.
-- `archive/by_topic/executor/`: executor-related materials.
-- `archive/by_topic/streaming-replication/`: streaming replication materials.
-- `archive/by_topic/backup-recovery/`: backup and recovery materials.
-- `archive/by_topic/uncategorized/`: files without a confident category yet.
+- `archive/optimizer/`: optimizer-related materials.
+- `archive/executor/`: executor-related materials.
+- `archive/streaming-replication/`: streaming replication materials.
+- `archive/backup-recovery/`: backup and recovery materials.
+- `archive/uncategorized/`: files without a confident category yet.
 - `data/pgppt.sqlite`: local SQLite state.
 - `reports/index.html`: local HTML report.
 - `reports/index.csv`: CSV report.
@@ -281,7 +282,7 @@ python3 pgppt.py list sessions
 
 ### Topic Classification
 
-Downloaded files are stored under `archive/by_topic/<category>/`, not grouped
+Downloaded files are stored under `archive/<category>/`, not grouped
 by event. Classification primarily uses the session/page abstract, with the
 title as a secondary signal. Event names are not used for keyword scoring.
 
@@ -295,7 +296,7 @@ Built-in categories include:
 - `high-availability`: failover, Patroni, repmgr, disaster recovery, and availability.
 - `performance`, `operations`, `storage`, `internals`, `extensions-ecosystem`, `cloud-native`, and `security`.
 
-Files without a confident match are stored under `archive/by_topic/uncategorized/`.
+Files without a confident match are stored under `archive/uncategorized/`.
 After improving `config/categories.json`, run:
 
 ```bash
@@ -312,6 +313,7 @@ Examples:
 
 ```text
 Semi Joins in Postgres.pdf
+Update on index prefetching.pdf
 PostgreSQL Backup Patterns - Demo Notes.pdf
 ```
 

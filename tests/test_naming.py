@@ -26,9 +26,13 @@ class NamingTests(unittest.TestCase):
     def test_safe_filename_stem_keeps_readable_title(self):
         self.assertEqual(
             pgppt.safe_filename_stem("Semi-Joins in Postgres: planner/optimizer?"),
-            "Semi-Joins in Postgres planner optimizer",
+            "Semi Joins in Postgres planner optimizer",
         )
         self.assertEqual(pgppt.safe_filename_stem("PostgreSQL 18.0"), "PostgreSQL 18.0")
+        self.assertEqual(
+            pgppt.safe_filename_stem("Update-on-index-prefetching.pdf"),
+            "Update on index prefetching",
+        )
 
     def test_asset_title_uses_page_title_for_single_asset(self):
         title = pgppt.asset_title_from_context(
@@ -110,7 +114,7 @@ class NamingTests(unittest.TestCase):
 
                 self.assertTrue(ok, msg)
                 row = conn.execute("select local_path from assets").fetchone()
-                self.assertEqual(row["local_path"], "archive/by_topic/uncategorized/Readable Talk Title.pdf")
+                self.assertEqual(row["local_path"], "archive/uncategorized/Readable Talk Title.pdf")
                 self.assertTrue((pgppt.ROOT / row["local_path"]).exists())
         finally:
             pgppt.ROOT = original_root
@@ -147,11 +151,62 @@ class NamingTests(unittest.TestCase):
 
                 self.assertTrue(ok, msg)
                 row = conn.execute("select local_path from assets").fetchone()
-                self.assertEqual(row["local_path"], "archive/by_topic/optimizer/Semi Joins in Postgres.pdf")
+                self.assertEqual(row["local_path"], "archive/optimizer/Semi Joins in Postgres.pdf")
                 self.assertTrue((pgppt.ROOT / row["local_path"]).exists())
         finally:
             pgppt.ROOT = original_root
             pgppt.request_url = original_request_url
+
+    def test_organize_archive_flattens_topic_directory_and_normalizes_filename(self):
+        original_root = pgppt.ROOT
+
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                pgppt.ROOT = Path(tmp)
+                old_path = pgppt.ROOT / "archive/by_topic/optimizer/Update-on-index-prefetching.pdf"
+                old_path.parent.mkdir(parents=True)
+                old_path.write_bytes(b"%PDF-1.4 old path\n")
+
+                conn = sqlite3.connect(":memory:")
+                conn.row_factory = sqlite3.Row
+                pgppt.init_db(conn)
+                pgppt.ensure_tags(conn)
+                event_id = pgppt.upsert_event(conn, "PGConf.dev 2026")
+                session_id = pgppt.upsert_session(
+                    conn,
+                    event_id,
+                    "Update-on-index-prefetching",
+                    abstract="This talk covers planner statistics and optimizer prefetching.",
+                )
+                conn.execute(
+                    """
+                    insert into assets(
+                        session_id, file_url, local_path, file_type, sha256,
+                        size_bytes, downloaded_at, created_at
+                    )
+                    values(?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        session_id,
+                        "https://example.org/Update-on-index-prefetching.pdf",
+                        "archive/by_topic/optimizer/Update-on-index-prefetching.pdf",
+                        "pdf",
+                        "oldsha",
+                        old_path.stat().st_size,
+                        pgppt.utcnow(),
+                        pgppt.utcnow(),
+                    ),
+                )
+                conn.commit()
+
+                messages = pgppt.organize_archive_by_topic(conn)
+
+                row = conn.execute("select local_path from assets").fetchone()
+                self.assertEqual(row["local_path"], "archive/optimizer/Update on index prefetching.pdf")
+                self.assertTrue((pgppt.ROOT / row["local_path"]).exists(), messages)
+                self.assertFalse(old_path.exists())
+        finally:
+            pgppt.ROOT = original_root
 
 
 if __name__ == "__main__":

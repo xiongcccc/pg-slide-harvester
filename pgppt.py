@@ -126,6 +126,7 @@ def safe_filename_stem(value: str | None, fallback: str = "untitled", max_length
     value = readable_text(value)
     value = re.sub(r"[\x00-\x1f\x7f]+", " ", value)
     value = re.sub(r'[<>:"/\\|?*]+', " ", value)
+    value = re.sub(r"(?<=[A-Za-z0-9])[-_]+(?=[A-Za-z0-9])", " ", value)
     value = re.sub(r"\s+", " ", value).strip(" .-_")
     if not value:
         value = fallback
@@ -427,7 +428,7 @@ def guess_extension(url: str, content_type: str | None = None) -> str:
 
 
 def safe_topic_dir(topic_slug: str) -> Path:
-    return ROOT / "archive" / "by_topic" / slugify(topic_slug, UNCATEGORIZED_TOPIC)
+    return ROOT / "archive" / slugify(topic_slug, UNCATEGORIZED_TOPIC)
 
 
 def primary_topic_slug(conn: sqlite3.Connection, session_id: int) -> str:
@@ -1510,7 +1511,7 @@ def organize_archive_by_topic(conn: sqlite3.Connection) -> list[str]:
 
 
 def rebuild_topic_index(conn: sqlite3.Connection) -> None:
-    topic_root = ROOT / "archive" / "by_topic"
+    topic_root = ROOT / "archive"
     topic_root.mkdir(parents=True, exist_ok=True)
 
 
@@ -1695,7 +1696,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("classify", help="rebuild tags for all sessions")
 
-    sub.add_parser("organize-archive", help="move downloaded assets into archive/by_topic/<category>/")
+    sub.add_parser("organize-archive", help="move downloaded assets into archive/<category>/")
 
     list_parser = sub.add_parser("list", help="list sessions or assets")
     list_parser.add_argument("target", choices=["events", "sessions", "assets"])
