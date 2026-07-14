@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/logo.svg" width="420" alt="pg-slide-harvester logo">
+  <img src="docs/assets/logo.png" width="380" alt="pg-slide-harvester logo">
 </p>
 
 <h1 align="center">pg-slide-harvester</h1>
