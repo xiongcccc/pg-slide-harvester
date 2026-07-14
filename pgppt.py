@@ -9,6 +9,7 @@ import html
 from html.parser import HTMLParser
 import json
 import mimetypes
+import os
 from pathlib import Path
 import re
 import shutil
@@ -91,6 +92,7 @@ GENERIC_ASSET_LABELS = {
 }
 UNCATEGORIZED_TOPIC = "uncategorized"
 BLOCK_TEXT_TAGS = {"p", "li", "h1", "h2", "h3"}
+ACTIVE_RUN_ID: int | None = None
 
 
 def utcnow() -> str:
@@ -238,6 +240,15 @@ def init_db(conn: sqlite3.Connection) -> None:
             status text not null,
             notes text
         );
+
+        create table if not exists run_assets (
+            run_id integer not null references crawl_runs(id) on delete cascade,
+            asset_id integer not null references assets(id) on delete cascade,
+            action text not null,
+            message text,
+            created_at text not null,
+            primary key(run_id, asset_id, action)
+        );
         """
     )
     conn.commit()
@@ -270,6 +281,29 @@ def finish_run(conn: sqlite3.Connection, run_id: int, status: str, notes: str = 
     conn.execute(
         "update crawl_runs set finished_at = ?, status = ?, notes = ? where id = ?",
         (utcnow(), status, notes, run_id),
+    )
+    conn.commit()
+
+
+def record_run_asset(
+    conn: sqlite3.Connection,
+    asset_id: int | None,
+    action: str,
+    message: str = "",
+    run_id: int | None = None,
+) -> None:
+    run_id = run_id if run_id is not None else ACTIVE_RUN_ID
+    if run_id is None or asset_id is None:
+        return
+    conn.execute(
+        """
+        insert into run_assets(run_id, asset_id, action, message, created_at)
+        values(?, ?, ?, ?, ?)
+        on conflict(run_id, asset_id, action) do update set
+            message = excluded.message,
+            created_at = excluded.created_at
+        """,
+        (run_id, asset_id, action, message, utcnow()),
     )
     conn.commit()
 
@@ -482,6 +516,7 @@ def download_asset(
                 conn.commit()
             mark_session_checked(conn, session_id, "downloaded")
             classify_session(conn, session_id)
+            record_run_asset(conn, existing_asset_id, "already_exists", existing["local_path"])
             return False, f"already exists: {existing['local_path']}"
         if int(existing["session_id"]) != session_id:
             conn.execute("update assets set session_id = ? where id = ?", (session_id, existing_asset_id))
@@ -538,15 +573,19 @@ def download_asset(
                 """,
                 (url, str(dest.relative_to(ROOT)), file_type, digest, size, now, now, session_id),
             )
+            existing_asset_id = int(conn.execute("select last_insert_rowid() as id").fetchone()["id"])
     except sqlite3.IntegrityError:
         dest.unlink(missing_ok=True)
-        row = conn.execute("select local_path from assets where sha256 = ?", (digest,)).fetchone()
+        row = conn.execute("select id, local_path from assets where sha256 = ?", (digest,)).fetchone()
         mark_session_checked(conn, session_id, "downloaded")
         classify_session(conn, session_id)
+        if row:
+            record_run_asset(conn, int(row["id"]), "duplicate_content", row["local_path"])
         return False, f"duplicate content: {row['local_path'] if row else digest}"
 
     mark_session_checked(conn, session_id, "downloaded")
     classify_session(conn, session_id)
+    record_run_asset(conn, existing_asset_id, "downloaded", str(dest.relative_to(ROOT)))
     conn.commit()
     return True, f"downloaded: {dest.relative_to(ROOT)}"
 
@@ -1622,6 +1661,165 @@ def report(conn: sqlite3.Connection) -> tuple[Path, Path]:
     return html_path, csv_path
 
 
+def report_slug(value: str, fallback: str = "run") -> str:
+    return slugify(value, fallback).lower()
+
+
+def run_report(conn: sqlite3.Connection, run_id: int) -> tuple[Path, Path, int]:
+    run = conn.execute("select * from crawl_runs where id = ?", (run_id,)).fetchone()
+    if not run:
+        raise ValueError(f"run not found: {run_id}")
+    started = parse_time(run["started_at"]) or dt.datetime.now(dt.timezone.utc)
+    run_date = started.astimezone().date().isoformat()
+    rows = conn.execute(
+        """
+        select
+            ra.action,
+            ra.message,
+            ra.created_at as recorded_at,
+            e.name as event_name,
+            s.title as session_title,
+            a.local_path,
+            a.file_url,
+            a.file_type,
+            a.size_bytes,
+            a.downloaded_at,
+            group_concat(t.label, ', ') as tags
+        from run_assets ra
+        join assets a on a.id = ra.asset_id
+        join sessions s on s.id = a.session_id
+        join events e on e.id = s.event_id
+        left join session_tags st on st.session_id = s.id
+        left join tags t on t.id = st.tag_id
+        where ra.run_id = ?
+        group by ra.run_id, ra.asset_id, ra.action
+        order by ra.created_at, e.name, s.title
+        """,
+        (run_id,),
+    ).fetchall()
+    event_names = sorted({row["event_name"] for row in rows if row["event_name"]})
+    if len(event_names) == 1:
+        event_part = report_slug(event_names[0])
+    elif len(event_names) > 1:
+        event_part = "multiple-events"
+    else:
+        event_part = report_slug(run["command"] or "run")
+    report_dir = ROOT / "reports" / "runs" / run_date
+    report_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"{event_part}-run-{run_id}"
+    csv_path = report_dir / f"{stem}.csv"
+    html_path = report_dir / f"{stem}.html"
+
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "run_id",
+                "run_date",
+                "command",
+                "action",
+                "event",
+                "session",
+                "tags",
+                "local_path",
+                "file_url",
+                "file_type",
+                "size_bytes",
+                "downloaded_at",
+                "recorded_at",
+            ]
+        )
+        for row in rows:
+            writer.writerow(
+                [
+                    run_id,
+                    run_date,
+                    run["command"],
+                    row["action"],
+                    row["event_name"],
+                    row["session_title"],
+                    row["tags"] or "",
+                    row["local_path"],
+                    row["file_url"],
+                    row["file_type"],
+                    row["size_bytes"],
+                    row["downloaded_at"],
+                    row["recorded_at"],
+                ]
+            )
+
+    items = []
+    for row in rows:
+        local = row["local_path"]
+        link_target = os.path.relpath(ROOT / local, report_dir)
+        link = f'<a href="{html.escape(link_target)}">{html.escape(local)}</a>'
+        items.append(
+            "<tr>"
+            f"<td>{html.escape(row['action'])}</td>"
+            f"<td>{html.escape(row['event_name'])}</td>"
+            f"<td>{html.escape(row['session_title'])}</td>"
+            f"<td>{html.escape(row['tags'] or '')}</td>"
+            f"<td>{link}</td>"
+            f"<td>{html.escape(str(row['size_bytes']))}</td>"
+            f"<td>{html.escape(row['recorded_at'])}</td>"
+            "</tr>"
+        )
+    html_doc = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PG Slide Run Report #{run_id}</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 32px; color: #1f2933; }}
+    h1 {{ font-size: 24px; margin-bottom: 8px; }}
+    .meta {{ color: #5f6b7a; margin-bottom: 24px; line-height: 1.6; }}
+    code {{ background: #f3f4f6; padding: 2px 5px; border-radius: 4px; }}
+    table {{ border-collapse: collapse; width: 100%; font-size: 14px; }}
+    th, td {{ border-bottom: 1px solid #e5e7eb; padding: 10px 8px; text-align: left; vertical-align: top; }}
+    th {{ background: #f7f9fb; position: sticky; top: 0; }}
+    a {{ color: #0f5ea8; }}
+  </style>
+</head>
+<body>
+  <h1>PG Slide Run Report #{run_id}</h1>
+  <div class="meta">
+    Date: {html.escape(run_date)}<br>
+    Command: <code>{html.escape(run['command'])}</code><br>
+    Status: {html.escape(run['status'])}<br>
+    Items: {len(rows)}
+  </div>
+  <table>
+    <thead>
+      <tr><th>Action</th><th>Event</th><th>Session</th><th>Tags</th><th>File</th><th>Size</th><th>Recorded At</th></tr>
+    </thead>
+    <tbody>
+      {''.join(items)}
+    </tbody>
+  </table>
+</body>
+</html>
+"""
+    html_path.write_text(html_doc, encoding="utf-8")
+    return html_path, csv_path, len(rows)
+
+
+def finish_with_reports(
+    conn: sqlite3.Connection,
+    run_id: int,
+    messages: list[str],
+    include_run_report: bool = False,
+) -> None:
+    html_path, _ = report(conn)
+    for msg in messages:
+        print(msg)
+    print(f"report: {html_path.relative_to(ROOT)}")
+    finish_run(conn, run_id, "ok", "\n".join(messages))
+    if include_run_report:
+        run_html_path, _, item_count = run_report(conn, run_id)
+        print(f"run report: {run_html_path.relative_to(ROOT)} ({item_count} items)")
+
+
 def list_rows(conn: sqlite3.Connection, target: str) -> list[str]:
     if target == "events":
         rows = conn.execute(
@@ -1704,12 +1902,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Iterable[str] | None = None) -> int:
+    global ACTIVE_RUN_ID
     args = build_parser().parse_args(argv)
     conn = connect()
     init_db(conn)
     ensure_tags(conn)
 
     run_id = begin_run(conn, " ".join(sys.argv[1:]))
+    ACTIVE_RUN_ID = run_id
     try:
         if args.command == "init":
             finish_run(conn, run_id, "ok", "initialized")
@@ -1718,20 +1918,12 @@ def main(argv: Iterable[str] | None = None) -> int:
 
         if args.command == "ingest":
             messages = ingest_url(conn, args.url, args.event, args.title)
-            html_path, _ = report(conn)
-            for msg in messages:
-                print(msg)
-            print(f"report: {html_path.relative_to(ROOT)}")
-            finish_run(conn, run_id, "ok", "\n".join(messages))
+            finish_with_reports(conn, run_id, messages, include_run_report=True)
             return 0
 
         if args.command == "scan-official":
             messages = discover_official_events(conn)
-            html_path, _ = report(conn)
-            for msg in messages:
-                print(msg)
-            print(f"report: {html_path.relative_to(ROOT)}")
-            finish_run(conn, run_id, "ok", "\n".join(messages))
+            finish_with_reports(conn, run_id, messages)
             return 0
 
         if args.command == "analyze-events":
@@ -1748,38 +1940,22 @@ def main(argv: Iterable[str] | None = None) -> int:
 
         if args.command == "crawl-pgevents":
             messages = crawl_pgevents(conn, args.sessions_url, args.event, args.delay, args.limit)
-            html_path, _ = report(conn)
-            for msg in messages:
-                print(msg)
-            print(f"report: {html_path.relative_to(ROOT)}")
-            finish_run(conn, run_id, "ok", "\n".join(messages))
+            finish_with_reports(conn, run_id, messages, include_run_report=True)
             return 0
 
         if args.command == "crawl-generic":
             messages = crawl_generic_site(conn, args.site_url, args.event, args.delay, args.limit, args.max_pages)
-            html_path, _ = report(conn)
-            for msg in messages:
-                print(msg)
-            print(f"report: {html_path.relative_to(ROOT)}")
-            finish_run(conn, run_id, "ok", "\n".join(messages))
+            finish_with_reports(conn, run_id, messages, include_run_report=True)
             return 0
 
         if args.command == "download-event":
             messages = download_event_by_name(conn, args.event_name, args.delay, args.limit)
-            html_path, _ = report(conn)
-            for msg in messages:
-                print(msg)
-            print(f"report: {html_path.relative_to(ROOT)}")
-            finish_run(conn, run_id, "ok", "\n".join(messages))
+            finish_with_reports(conn, run_id, messages, include_run_report=True)
             return 0
 
         if args.command == "tick":
             messages = tick(conn, args.limit)
-            html_path, _ = report(conn)
-            for msg in messages:
-                print(msg)
-            print(f"report: {html_path.relative_to(ROOT)}")
-            finish_run(conn, run_id, "ok", "\n".join(messages))
+            finish_with_reports(conn, run_id, messages, include_run_report=True)
             return 0
 
         if args.command == "report":
@@ -1799,11 +1975,7 @@ def main(argv: Iterable[str] | None = None) -> int:
 
         if args.command == "organize-archive":
             messages = organize_archive_by_topic(conn)
-            html_path, _ = report(conn)
-            for msg in messages:
-                print(msg)
-            print(f"report: {html_path.relative_to(ROOT)}")
-            finish_run(conn, run_id, "ok", "\n".join(messages))
+            finish_with_reports(conn, run_id, messages)
             return 0
 
         if args.command == "list":
@@ -1814,6 +1986,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     except Exception as exc:  # noqa: BLE001
         finish_run(conn, run_id, "failed", str(exc))
         raise
+    finally:
+        ACTIVE_RUN_ID = None
     return 1
 
 

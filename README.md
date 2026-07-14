@@ -15,6 +15,8 @@
   <a href="#中文说明">中文</a> ·
   <a href="#quick-start">Quick Start</a> ·
   <a href="#快速开始">快速开始</a> ·
+  <a href="#reports">Reports</a> ·
+  <a href="#报告">报告</a> ·
   <a href="#license">License</a>
 </p>
 
@@ -51,6 +53,7 @@ published, downloading files one by one, and renaming cryptic filenames by hand.
   `Update-on-index-prefetching.pdf` -> `Update on index prefetching.pdf`.
 - Re-check sessions whose materials are published later.
 - Generate local HTML and CSV reports.
+- Generate one dated run report for each download command.
 - Use only the Python standard library.
 
 ### Supported Sources
@@ -86,6 +89,8 @@ archive/uncategorized/
 data/pgppt.sqlite
 reports/index.html
 reports/index.csv
+reports/runs/2026-07-14/pgconf.dev-2026-run-12.html
+reports/runs/2026-07-14/pgconf.dev-2026-run-12.csv
 ```
 
 Local archives, reports, and SQLite state are ignored by git.
@@ -124,6 +129,23 @@ python3 pgppt.py organize-archive
 python3 pgppt.py list assets
 python3 pgppt.py list sessions
 ```
+
+### Reports
+
+The project generates two kinds of reports:
+
+| Report | Path | Meaning |
+| --- | --- | --- |
+| Full snapshot | `reports/index.html`, `reports/index.csv` | Current complete SQLite state. Regenerated and overwritten on each report-producing command. |
+| Run report | `reports/runs/<date>/<event>-run-<id>.html`, `.csv` | One dated report for a single download run. Shows what that run downloaded or touched. |
+
+Run reports are created by download-oriented commands such as `download-event`,
+`ingest`, `crawl-pgevents`, `crawl-generic`, and `tick`.
+
+Each run report includes the run command, date, action, event, session, tags,
+local file path, source URL, size, and timestamps. Actions include
+`downloaded`, `already_exists`, and `duplicate_content`, so you can distinguish
+newly downloaded files from files that were already present locally.
 
 ### Topic Archive
 
@@ -230,6 +252,7 @@ PostgreSQL 生态会议中的公开 PPT/PDF 资料。它会从 PostgreSQL 官方
   `Update-on-index-prefetching.pdf` -> `Update on index prefetching.pdf`。
 - 对暂未发布资料的 session 进行记录，后续可以继续补抓。
 - 生成本地 HTML/CSV 报告。
+- 每次下载命令都会生成一份按日期保存的运行报告。
 - 只使用 Python 标准库。
 
 ### 当前支持的来源
@@ -263,6 +286,8 @@ archive/uncategorized/
 data/pgppt.sqlite
 reports/index.html
 reports/index.csv
+reports/runs/2026-07-14/pgconf.dev-2026-run-12.html
+reports/runs/2026-07-14/pgconf.dev-2026-run-12.csv
 ```
 
 本地归档、报告和 SQLite 状态默认不会提交到 git。
@@ -301,6 +326,22 @@ python3 pgppt.py organize-archive
 python3 pgppt.py list assets
 python3 pgppt.py list sessions
 ```
+
+### 报告
+
+项目会生成两类报告：
+
+| 报告 | 路径 | 含义 |
+| --- | --- | --- |
+| 全量快照 | `reports/index.html`、`reports/index.csv` | 当前 SQLite 状态库的完整视图。每次重新生成时会覆盖旧文件。 |
+| 运行报告 | `reports/runs/<date>/<event>-run-<id>.html`、`.csv` | 单次下载运行的独立清单，按日期和 event 保存。 |
+
+运行报告会由下载类命令自动生成，例如 `download-event`、`ingest`、
+`crawl-pgevents`、`crawl-generic` 和 `tick`。
+
+每份运行报告包含本次命令、日期、动作、会议、session、分类、文件路径、源 URL、
+文件大小和时间戳。动作包括 `downloaded`、`already_exists`、
+`duplicate_content`，因此可以区分“今天新下载的文件”和“本地之前已经存在的文件”。
 
 ### 主题归档
 

@@ -208,6 +208,53 @@ class NamingTests(unittest.TestCase):
         finally:
             pgppt.ROOT = original_root
 
+    def test_run_report_records_assets_for_one_download_run(self):
+        body = b"%PDF-1.4 run report\n"
+        original_root = pgppt.ROOT
+        original_request_url = pgppt.request_url
+        original_active_run_id = pgppt.ACTIVE_RUN_ID
+
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                pgppt.ROOT = Path(tmp)
+                pgppt.request_url = lambda url: FakeResponse(body)
+                conn = sqlite3.connect(":memory:")
+                conn.row_factory = sqlite3.Row
+                pgppt.init_db(conn)
+                pgppt.ensure_tags(conn)
+                run_id = pgppt.begin_run(conn, 'download-event "PGConf.dev 2026"')
+                pgppt.ACTIVE_RUN_ID = run_id
+                event_id = pgppt.upsert_event(conn, "PGConf.dev 2026")
+                session_id = pgppt.upsert_session(
+                    conn,
+                    event_id,
+                    "Update-on-index-prefetching",
+                    abstract="This talk covers planner statistics and optimizer prefetching.",
+                )
+
+                ok, msg = pgppt.download_asset(
+                    conn,
+                    session_id,
+                    "https://example.org/Update-on-index-prefetching.pdf",
+                    "PGConf.dev 2026",
+                    "Update-on-index-prefetching",
+                )
+                pgppt.finish_run(conn, run_id, "ok", msg)
+                html_path, csv_path, count = pgppt.run_report(conn, run_id)
+
+                self.assertTrue(ok, msg)
+                self.assertEqual(count, 1)
+                self.assertTrue(html_path.exists())
+                self.assertTrue(csv_path.exists())
+                self.assertIn("reports/runs/", str(html_path))
+                csv_text = csv_path.read_text(encoding="utf-8")
+                self.assertIn("downloaded", csv_text)
+                self.assertIn("archive/optimizer/Update on index prefetching.pdf", csv_text)
+        finally:
+            pgppt.ROOT = original_root
+            pgppt.request_url = original_request_url
+            pgppt.ACTIVE_RUN_ID = original_active_run_id
+
 
 if __name__ == "__main__":
     unittest.main()
