@@ -9,7 +9,6 @@ import html
 from html.parser import HTMLParser
 import json
 import mimetypes
-import os
 from pathlib import Path
 import re
 import shutil
@@ -90,6 +89,8 @@ GENERIC_ASSET_LABELS = {
     "slides pdf",
     "view slides",
 }
+UNCATEGORIZED_TOPIC = "uncategorized"
+BLOCK_TEXT_TAGS = {"p", "li", "h1", "h2", "h3"}
 
 
 def utcnow() -> str:
@@ -304,6 +305,8 @@ def upsert_session(
     title: str,
     session_url: str | None = None,
     asset_status: str = "missing",
+    speakers: str | None = None,
+    abstract: str | None = None,
 ) -> int:
     now = utcnow()
     slug = slugify(title)
@@ -317,6 +320,8 @@ def upsert_session(
         values(?, ?, ?, ?, ?, ?, ?, ?)
         on conflict(event_id, slug) do update set
             session_url = coalesce(excluded.session_url, sessions.session_url),
+            speakers = coalesce(excluded.speakers, sessions.speakers),
+            abstract = coalesce(excluded.abstract, sessions.abstract),
             asset_status = case
                 when sessions.asset_status = 'downloaded' then sessions.asset_status
                 else excluded.asset_status
@@ -325,6 +330,17 @@ def upsert_session(
         """,
         (event_id, title, slug, session_url, asset_status, next_check, now, now),
     )
+    if speakers or abstract:
+        conn.execute(
+            """
+            update sessions
+            set speakers = coalesce(?, speakers),
+                abstract = coalesce(?, abstract),
+                updated_at = ?
+            where event_id = ? and slug = ?
+            """,
+            (speakers, abstract, now, event_id, slug),
+        )
     row = conn.execute(
         "select id from sessions where event_id = ? and slug = ?", (event_id, slug)
     ).fetchone()
@@ -410,8 +426,32 @@ def guess_extension(url: str, content_type: str | None = None) -> str:
     return ".bin"
 
 
-def safe_event_dir(event_name: str) -> Path:
-    return ROOT / "archive" / "by_event" / slugify(event_name)
+def safe_topic_dir(topic_slug: str) -> Path:
+    return ROOT / "archive" / "by_topic" / slugify(topic_slug, UNCATEGORIZED_TOPIC)
+
+
+def primary_topic_slug(conn: sqlite3.Connection, session_id: int) -> str:
+    row = conn.execute(
+        """
+        select t.slug
+        from session_tags st
+        join tags t on t.id = st.tag_id
+        where st.session_id = ?
+        order by st.confidence desc, t.slug
+        limit 1
+        """,
+        (session_id,),
+    ).fetchone()
+    return row["slug"] if row else UNCATEGORIZED_TOPIC
+
+
+def unique_asset_path(dest_dir: Path, filename_stem: str, ext: str) -> Path:
+    dest = dest_dir / f"{filename_stem}{ext}"
+    counter = 2
+    while dest.exists():
+        dest = dest_dir / f"{filename_stem}-{counter}{ext}"
+        counter += 1
+    return dest
 
 
 def sha256_file(path: Path) -> str:
@@ -429,6 +469,7 @@ def download_asset(
     event_name: str,
     session_title: str,
 ) -> tuple[bool, str]:
+    classify_session(conn, session_id)
     existing_asset_id: int | None = None
     existing = conn.execute("select id, local_path, session_id from assets where file_url = ?", (url,)).fetchone()
     if existing:
@@ -451,16 +492,11 @@ def download_asset(
             ext = guess_extension(url, content_type)
             if ext.lower() not in ASSET_EXTENSIONS and "pdf" not in content_type.lower():
                 return False, f"skipped non-slide asset content-type={content_type}"
-            event_dir = safe_event_dir(event_name)
-            event_dir.mkdir(parents=True, exist_ok=True)
+            topic_dir = safe_topic_dir(primary_topic_slug(conn, session_id))
+            topic_dir.mkdir(parents=True, exist_ok=True)
             filename_stem = safe_filename_stem(session_title)
-            filename = filename_stem + ext
-            dest = event_dir / filename
-            counter = 2
-            while dest.exists():
-                dest = event_dir / f"{filename_stem}-{counter}{ext}"
-                counter += 1
-            with tempfile.NamedTemporaryFile(delete=False, dir=str(event_dir)) as tmp:
+            dest = unique_asset_path(topic_dir, filename_stem, ext)
+            with tempfile.NamedTemporaryFile(delete=False, dir=str(topic_dir)) as tmp:
                 tmp_path = Path(tmp.name)
                 shutil.copyfileobj(resp, tmp)
         tmp_path.replace(dest)
@@ -543,31 +579,51 @@ def mark_session_checked(conn: sqlite3.Connection, session_id: int, status: str)
     conn.commit()
 
 
+def keyword_matches(text: str, keyword: str) -> bool:
+    keyword = keyword.lower().strip()
+    if not keyword:
+        return False
+    if re.search(r"[a-z0-9]", keyword):
+        pattern = r"(?<![A-Za-z0-9])" + re.escape(keyword) + r"(?![A-Za-z0-9])"
+        return bool(re.search(pattern, text))
+    return keyword in text
+
+
 def classify_session(conn: sqlite3.Connection, session_id: int) -> None:
     row = conn.execute(
         """
-        select s.title, s.abstract, e.name as event_name
-        from sessions s join events e on e.id = s.event_id
+        select s.title, s.abstract
+        from sessions s
         where s.id = ?
         """,
         (session_id,),
     ).fetchone()
     if not row:
         return
-    text = " ".join([row["title"] or "", row["abstract"] or "", row["event_name"] or ""]).lower()
+    conn.execute("delete from session_tags where session_id = ?", (session_id,))
+    title_text = (row["title"] or "").lower()
+    abstract_text = (row["abstract"] or "").lower()
     categories = load_json(CATEGORIES_PATH, {})
     for slug, item in categories.items():
-        hits = []
+        abstract_hits = []
+        title_hits = []
         for keyword in item.get("keywords", []):
-            pattern = r"\b" + re.escape(keyword.lower()) + r"\b"
-            if re.search(pattern, text):
-                hits.append(keyword)
+            if keyword_matches(abstract_text, keyword):
+                abstract_hits.append(keyword)
+            elif keyword_matches(title_text, keyword):
+                title_hits.append(keyword)
+        hits = abstract_hits + title_hits
         if not hits:
             continue
         tag = conn.execute("select id from tags where slug = ?", (slug,)).fetchone()
         if not tag:
             continue
-        confidence = min(1.0, 0.45 + len(hits) * 0.15)
+        confidence = min(1.0, 0.35 + len(abstract_hits) * 0.22 + len(title_hits) * 0.1)
+        reason_parts = []
+        if abstract_hits:
+            reason_parts.append("abstract: " + ", ".join(abstract_hits[:6]))
+        if title_hits:
+            reason_parts.append("title: " + ", ".join(title_hits[:6]))
         conn.execute(
             """
             insert into session_tags(session_id, tag_id, confidence, reason)
@@ -576,7 +632,7 @@ def classify_session(conn: sqlite3.Connection, session_id: int) -> None:
                 confidence = excluded.confidence,
                 reason = excluded.reason
             """,
-            (session_id, int(tag["id"]), confidence, "keywords: " + ", ".join(hits[:8])),
+            (session_id, int(tag["id"]), confidence, "; ".join(reason_parts)),
         )
     conn.commit()
 
@@ -595,13 +651,31 @@ class LinkParser(HTMLParser):
         super().__init__()
         self.base_url = base_url
         self.links: list[tuple[str, str]] = []
+        self.title = ""
+        self.meta_description = ""
+        self.text_blocks: list[str] = []
         self._current_href: str | None = None
         self._text_parts: list[str] = []
+        self._in_title = False
+        self._block_depth = 0
+        self._block_parts: list[str] = []
 
     def handle_starttag(self, tag: str, attrs):
-        if tag.lower() != "a":
+        tag = tag.lower()
+        attr_map = {key.lower(): value for key, value in attrs}
+        if tag == "meta":
+            name = (attr_map.get("name") or attr_map.get("property") or "").lower()
+            if name in {"description", "og:description", "twitter:description"}:
+                self.meta_description = readable_text(attr_map.get("content") or self.meta_description)
+        if tag == "title":
+            self._in_title = True
+        if tag in BLOCK_TEXT_TAGS:
+            if self._block_depth == 0:
+                self._block_parts = []
+            self._block_depth += 1
+        if tag != "a":
             return
-        href = dict(attrs).get("href")
+        href = attr_map.get("href")
         if href:
             self._current_href = urljoin(self.base_url, href)
             self._text_parts = []
@@ -609,30 +683,62 @@ class LinkParser(HTMLParser):
     def handle_data(self, data: str):
         if self._current_href:
             self._text_parts.append(data)
+        if self._in_title:
+            self.title = readable_text(f"{self.title} {data}")
+        if self._block_depth:
+            self._block_parts.append(data)
 
     def handle_endtag(self, tag: str):
-        if tag.lower() == "a" and self._current_href:
+        tag = tag.lower()
+        if tag == "title":
+            self._in_title = False
+        if tag in BLOCK_TEXT_TAGS and self._block_depth:
+            self._block_depth -= 1
+            if self._block_depth == 0:
+                block = readable_text(" ".join(self._block_parts))
+                if block:
+                    self.text_blocks.append(block)
+                self._block_parts = []
+        if tag == "a" and self._current_href:
             self.links.append((self._current_href, html.unescape(" ".join(self._text_parts)).strip()))
             self._current_href = None
             self._text_parts = []
 
 
-def extract_asset_links(page_url: str) -> list[tuple[str, str]]:
+def summarize_text_blocks(blocks: list[str], max_length: int = 1800) -> str:
+    summary_parts: list[str] = []
+    for block in blocks:
+        block = readable_text(block)
+        if not block or block.lower() in GENERIC_ASSET_LABELS:
+            continue
+        summary_parts.append(block)
+        if len(" ".join(summary_parts)) >= max_length:
+            break
+    return " ".join(summary_parts)[:max_length].strip()
+
+
+def parse_html_page(page_url: str, text: str) -> dict[str, object]:
+    parser = LinkParser(page_url)
+    parser.feed(text)
+    abstract = parser.meta_description or summarize_text_blocks(parser.text_blocks)
+    return {"links": parser.links, "title": parser.title, "abstract": abstract}
+
+
+def extract_page_info(page_url: str) -> dict[str, object]:
     with request_url(page_url) as resp:
         content = resp.read()
     text = content.decode("utf-8", errors="replace")
-    parser = LinkParser(page_url)
-    parser.feed(text)
-    return [(url, label) for url, label in parser.links if is_asset_url(url)]
+    return parse_html_page(page_url, text)
+
+
+def extract_asset_links(page_url: str) -> list[tuple[str, str]]:
+    info = extract_page_info(page_url)
+    return [(url, label) for url, label in info["links"] if is_asset_url(url)]
 
 
 def extract_links(page_url: str) -> list[tuple[str, str]]:
-    with request_url(page_url) as resp:
-        content = resp.read()
-    text = content.decode("utf-8", errors="replace")
-    parser = LinkParser(page_url)
-    parser.feed(text)
-    return parser.links
+    info = extract_page_info(page_url)
+    return list(info["links"])
 
 
 def read_url_text(url: str) -> str:
@@ -688,6 +794,10 @@ def discover_indico_contributions(timetable_url: str) -> list[dict[str, object]]
             continue
         raw_title = title_match.group(1) if hasattr(title_match, "group") else title_match
         title = html.unescape(json_string(raw_title))
+        desc_match = re.search(r'"description":"((?:\\.|[^"\\])*)"', chunk)
+        abstract = ""
+        if desc_match:
+            abstract = readable_text(re.sub(r"<[^>]+>", " ", html.unescape(json_string(desc_match.group(1)))))
         url_match = re.search(r'"url":"((?:\\.|[^"\\])*)"', chunk)
         session_url = urljoin(timetable_url, json_string(url_match.group(1))) if url_match else timetable_url
         assets = []
@@ -700,7 +810,7 @@ def discover_indico_contributions(timetable_url: str) -> list[dict[str, object]]
             asset_title = html.unescape(json_string(asset_match.group(2)))
             if is_asset_url(asset_url) or is_asset_url(asset_title):
                 assets.append((asset_url, asset_title))
-        contributions.append({"title": title, "session_url": session_url, "assets": assets})
+        contributions.append({"title": title, "session_url": session_url, "abstract": abstract, "assets": assets})
     return contributions
 
 
@@ -730,6 +840,7 @@ def crawl_indico(
             title,
             session_url=str(contribution["session_url"]),
             asset_status="missing",
+            abstract=str(contribution.get("abstract") or ""),
         )
         assets = list(contribution["assets"])
         if not assets:
@@ -770,12 +881,15 @@ def discover_wordpress_pages(site_url: str) -> list[dict[str, str]]:
     for page in payload:
         title = html.unescape(page.get("title", {}).get("rendered", "") or page.get("slug", ""))
         content = page.get("content", {}).get("rendered", "") or ""
+        excerpt = page.get("excerpt", {}).get("rendered", "") or ""
+        page_info = parse_html_page(page.get("link", site_url), html.unescape(content))
         pages.append(
             {
                 "title": re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", title)).strip() or page.get("slug", "page"),
                 "slug": page.get("slug", ""),
                 "link": page.get("link", site_url),
                 "content": html.unescape(content),
+                "abstract": readable_text(re.sub(r"<[^>]+>", " ", html.unescape(excerpt))) or str(page_info["abstract"]),
             }
         )
     return pages
@@ -822,7 +936,14 @@ def crawl_wordpress(
         if not candidate:
             continue
         candidate_pages += 1
-        session_id = upsert_session(conn, event_id, page["title"], session_url=page["link"], asset_status="missing")
+        session_id = upsert_session(
+            conn,
+            event_id,
+            page["title"],
+            session_url=page["link"],
+            asset_status="missing",
+            abstract=page.get("abstract", ""),
+        )
 
         if not assets:
             mark_session_checked(conn, session_id, "missing")
@@ -903,17 +1024,26 @@ def crawl_generic_site(
 
     for page_url, title in pages:
         try:
-            links = extract_links(page_url)
+            page_info = extract_page_info(page_url)
+            links = list(page_info["links"])
         except Exception as exc:  # noqa: BLE001
             failed += 1
             messages.append(f"ERROR {title}: page scan failed: {exc}")
             continue
+        title = str(page_info["title"] or title)
         assets = [(url, label) for url, label in links if is_probably_slide_asset(url, label)]
         candidate = link_looks_relevant(page_url, title) or bool(assets)
         if not candidate:
             continue
         candidate_pages += 1
-        session_id = upsert_session(conn, event_id, title, session_url=page_url, asset_status="missing")
+        session_id = upsert_session(
+            conn,
+            event_id,
+            title,
+            session_url=page_url,
+            asset_status="missing",
+            abstract=str(page_info["abstract"] or ""),
+        )
         if not assets:
             mark_session_checked(conn, session_id, "missing")
             missing += 1
@@ -960,7 +1090,17 @@ def crawl_pgevents(
     for session_url, title in discovered:
         session_id = upsert_session(conn, event_id, title, session_url=session_url, asset_status="missing")
         try:
-            assets = extract_asset_links(session_url)
+            page_info = extract_page_info(session_url)
+            assets = [(url, label) for url, label in page_info["links"] if is_asset_url(url)]
+            if page_info["abstract"]:
+                upsert_session(
+                    conn,
+                    event_id,
+                    title,
+                    session_url=session_url,
+                    asset_status="missing",
+                    abstract=str(page_info["abstract"]),
+                )
         except HTTPError as exc:
             status = "login_required" if exc.code in (401, 403) else "failed"
             mark_session_checked(conn, session_id, status)
@@ -1274,16 +1414,26 @@ def ingest_url(conn: sqlite3.Connection, url: str, event_name: str | None, sessi
     event = event_name or infer_event_name(url)
     title = session_title or infer_session_title(url)
     event_id = upsert_event(conn, event, source_url=url, website_url=url)
-    session_id = upsert_session(conn, event_id, title, session_url=url, asset_status="missing")
     try:
-        links = extract_asset_links(url)
+        page_info = extract_page_info(url)
+        links = [(asset_url, label) for asset_url, label in page_info["links"] if is_asset_url(asset_url)]
     except HTTPError as exc:
+        session_id = upsert_session(conn, event_id, title, session_url=url, asset_status="missing")
         mark_session_checked(conn, session_id, "login_required" if exc.code in (401, 403) else "failed")
         return [f"ERROR http error {exc.code}: {exc.reason}"]
     except Exception as exc:  # noqa: BLE001
+        session_id = upsert_session(conn, event_id, title, session_url=url, asset_status="missing")
         mark_session_checked(conn, session_id, "failed")
         return [f"ERROR page scan failed: {exc}"]
 
+    session_id = upsert_session(
+        conn,
+        event_id,
+        title,
+        session_url=url,
+        asset_status="missing",
+        abstract=str(page_info["abstract"] or ""),
+    )
     if not links:
         mark_session_checked(conn, session_id, "missing")
         return [f"WAIT no slide assets found; next check scheduled"]
@@ -1321,31 +1471,47 @@ def tick(conn: sqlite3.Connection, limit: int) -> list[str]:
     return messages
 
 
+def organize_archive_by_topic(conn: sqlite3.Connection) -> list[str]:
+    rows = conn.execute(
+        """
+        select a.id as asset_id, a.local_path, s.id as session_id, s.title as session_title
+        from assets a
+        join sessions s on s.id = a.session_id
+        order by a.downloaded_at
+        """
+    ).fetchall()
+    messages: list[str] = []
+    moved = 0
+    missing = 0
+    for row in rows:
+        classify_session(conn, int(row["session_id"]))
+        src = ROOT / row["local_path"]
+        if not src.exists():
+            missing += 1
+            messages.append(f"MISS {row['local_path']}")
+            continue
+        topic_dir = safe_topic_dir(primary_topic_slug(conn, int(row["session_id"])))
+        topic_dir.mkdir(parents=True, exist_ok=True)
+        stem = safe_filename_stem(row["session_title"])
+        preferred_dest = topic_dir / f"{stem}{src.suffix}"
+        if src.resolve() == preferred_dest.resolve():
+            continue
+        dest = unique_asset_path(topic_dir, stem, src.suffix)
+        shutil.move(str(src), str(dest))
+        conn.execute(
+            "update assets set local_path = ? where id = ?",
+            (str(dest.relative_to(ROOT)), int(row["asset_id"])),
+        )
+        moved += 1
+        messages.append(f"MOVE {row['local_path']} -> {dest.relative_to(ROOT)}")
+    conn.commit()
+    messages.append(f"summary: moved={moved}, missing={missing}, total={len(rows)}")
+    return messages
+
+
 def rebuild_topic_index(conn: sqlite3.Connection) -> None:
     topic_root = ROOT / "archive" / "by_topic"
     topic_root.mkdir(parents=True, exist_ok=True)
-    rows = conn.execute(
-        """
-        select a.local_path, t.slug
-        from assets a
-        join sessions s on s.id = a.session_id
-        join session_tags st on st.session_id = s.id
-        join tags t on t.id = st.tag_id
-        """
-    ).fetchall()
-    for row in rows:
-        src = ROOT / row["local_path"]
-        if not src.exists():
-            continue
-        dest_dir = topic_root / row["slug"]
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        dest = dest_dir / src.name
-        if dest.exists():
-            continue
-        try:
-            os.symlink(os.path.relpath(src, dest_dir), dest)
-        except OSError:
-            shutil.copy2(src, dest)
 
 
 def report(conn: sqlite3.Connection) -> tuple[Path, Path]:
@@ -1529,6 +1695,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("classify", help="rebuild tags for all sessions")
 
+    sub.add_parser("organize-archive", help="move downloaded assets into archive/by_topic/<category>/")
+
     list_parser = sub.add_parser("list", help="list sessions or assets")
     list_parser.add_argument("target", choices=["events", "sessions", "assets"])
     return parser
@@ -1626,6 +1794,15 @@ def main(argv: Iterable[str] | None = None) -> int:
             print(f"classified sessions: {count}")
             print(f"report: {html_path.relative_to(ROOT)}")
             finish_run(conn, run_id, "ok", f"classified {count} sessions")
+            return 0
+
+        if args.command == "organize-archive":
+            messages = organize_archive_by_topic(conn)
+            html_path, _ = report(conn)
+            for msg in messages:
+                print(msg)
+            print(f"report: {html_path.relative_to(ROOT)}")
+            finish_run(conn, run_id, "ok", "\n".join(messages))
             return 0
 
         if args.command == "list":

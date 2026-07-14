@@ -13,7 +13,7 @@ opening every event website.
 
 `pg-slide-harvester` 用于自动发现、下载和整理 PostgreSQL 生态会议中的公开
 PPT/PDF 资料。它会从 PostgreSQL 官方活动列表和会议官网中发现资料链接，将
-下载结果按会议归档，并为后续分类、检索和补抓提供本地状态记录。
+下载结果按主题分类归档，并为后续检索和补抓提供本地状态记录。
 
 这个项目的目标不是做一个复杂平台，而是解决一个真实的小痛点：
 
@@ -31,8 +31,9 @@ PPT/PDF 资料。它会从 PostgreSQL 官方活动列表和会议官网中发现
 - 下载后优先使用演讲标题命名文件，例如：
   `Semi Joins in Postgres.pdf`。
 - 自动清理文件名中的非法字符，处理重名、超长标题和特殊符号。
+- 基于 session/页面简介优先判断主题分类，例如优化器、执行器、流复制、备份恢复。
 - 记录暂未发布资料的 session，并在后续 `tick` 任务中继续检查。
-- 按会议归档资料，并可按主题生成索引。
+- 按主题目录保存资料，会议信息保留在 SQLite 和报告中用于溯源。
 - 生成本地 HTML/CSV 报告。
 - 使用 SQLite 保存抓取状态，重复运行时会跳过已存在文件。
 - 如果本地 `archive/` 被手动删除，会在再次抓取时重新下载缺失文件。
@@ -59,8 +60,11 @@ python3 pgppt.py report
 
 常用目录：
 
-- `archive/by_event/`：按会议归档的资料。
-- `archive/by_topic/`：按主题生成的索引。
+- `archive/by_topic/optimizer/`：优化器相关资料。
+- `archive/by_topic/executor/`：执行器相关资料。
+- `archive/by_topic/streaming-replication/`：流复制相关资料。
+- `archive/by_topic/backup-recovery/`：备份恢复相关资料。
+- `archive/by_topic/uncategorized/`：暂未命中分类的资料。
 - `data/pgppt.sqlite`：本地 SQLite 状态库。
 - `reports/index.html`：本地 HTML 报告。
 - `reports/index.csv`：CSV 报告。
@@ -94,9 +98,36 @@ python3 pgppt.py tick
 # 重新生成报告
 python3 pgppt.py report
 
+# 将旧版本下载到其他目录的资料迁移到主题目录
+python3 pgppt.py organize-archive
+
 # 查看本地资料和 session 状态
 python3 pgppt.py list assets
 python3 pgppt.py list sessions
+```
+
+### 主题分类策略
+
+下载资料会进入 `archive/by_topic/<category>/`，而不是按会议分散保存。
+分类优先使用 session 页面或会议系统中的简介/摘要，其次才使用标题作为辅助信号。
+会议名称不会参与关键词打分，避免把整场会议误判成某一个主题。
+
+当前内置主题包括：
+
+- `optimizer`：优化器、planner、cost、statistics、join order 等。
+- `executor`：执行器、query execution、parallel query、aggregate、sort 等。
+- `streaming-replication`：流复制、physical replication、standby、WAL sender/receiver 等。
+- `logical-replication`：逻辑复制、logical decoding、publication/subscription 等。
+- `backup-recovery`：备份、恢复、PITR、pgBackRest、Barman 等。
+- `high-availability`：高可用、failover、Patroni、repmgr、disaster recovery 等。
+- 以及 `performance`、`operations`、`storage`、`internals`、`extensions-ecosystem`、`cloud-native`、`security`。
+
+未命中分类的资料会放入 `archive/by_topic/uncategorized/`，后续可以通过完善
+`config/categories.json` 再运行：
+
+```bash
+python3 pgppt.py classify
+python3 pgppt.py organize-archive
 ```
 
 ### 文件命名策略
@@ -173,7 +204,7 @@ not to become a heavy content platform.
 - Name downloaded files with readable talk titles.
 - Sanitize filenames for common cross-platform filesystem constraints.
 - Re-check sessions whose slides are not available yet.
-- Organize files by event and topic.
+- Organize files by topic, while keeping event metadata in SQLite and reports.
 - Generate local HTML and CSV reports.
 - Store crawl state in SQLite.
 - Re-download missing local files if the archive directory was removed.
@@ -202,8 +233,11 @@ python3 pgppt.py report
 
 Generated local artifacts:
 
-- `archive/by_event/`: files grouped by event.
-- `archive/by_topic/`: topic-based indexes.
+- `archive/by_topic/optimizer/`: optimizer-related materials.
+- `archive/by_topic/executor/`: executor-related materials.
+- `archive/by_topic/streaming-replication/`: streaming replication materials.
+- `archive/by_topic/backup-recovery/`: backup and recovery materials.
+- `archive/by_topic/uncategorized/`: files without a confident category yet.
 - `data/pgppt.sqlite`: local SQLite state.
 - `reports/index.html`: local HTML report.
 - `reports/index.csv`: CSV report.
@@ -237,9 +271,36 @@ python3 pgppt.py tick
 # Regenerate reports.
 python3 pgppt.py report
 
+# Move older downloaded files into topic directories.
+python3 pgppt.py organize-archive
+
 # Inspect local state.
 python3 pgppt.py list assets
 python3 pgppt.py list sessions
+```
+
+### Topic Classification
+
+Downloaded files are stored under `archive/by_topic/<category>/`, not grouped
+by event. Classification primarily uses the session/page abstract, with the
+title as a secondary signal. Event names are not used for keyword scoring.
+
+Built-in categories include:
+
+- `optimizer`: planner, cost model, statistics, join order, and related topics.
+- `executor`: executor, query execution, parallel query, aggregate, sort, and related topics.
+- `streaming-replication`: physical replication, standby, WAL sender/receiver, and replication slots.
+- `logical-replication`: logical decoding, publication/subscription, and CDC.
+- `backup-recovery`: backup, restore, PITR, pgBackRest, Barman, and base backup.
+- `high-availability`: failover, Patroni, repmgr, disaster recovery, and availability.
+- `performance`, `operations`, `storage`, `internals`, `extensions-ecosystem`, `cloud-native`, and `security`.
+
+Files without a confident match are stored under `archive/by_topic/uncategorized/`.
+After improving `config/categories.json`, run:
+
+```bash
+python3 pgppt.py classify
+python3 pgppt.py organize-archive
 ```
 
 ### Filename Policy

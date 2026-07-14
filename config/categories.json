@@ -1,16 +1,67 @@
 {
-  "high-availability": {
-    "label": "高可用",
+  "optimizer": {
+    "label": "优化器",
     "keywords": [
-      "high availability",
-      "ha",
-      "failover",
-      "replication",
-      "patroni",
+      "optimizer",
+      "planner",
+      "query planner",
+      "cost model",
+      "costing",
+      "statistics",
+      "selectivity",
+      "cardinality",
+      "join order",
+      "semi join",
+      "semi joins",
+      "semi-join",
+      "semijoin",
+      "explain",
+      "plan"
+    ]
+  },
+  "executor": {
+    "label": "执行器",
+    "keywords": [
+      "executor",
+      "execution",
+      "query execution",
+      "parallel query",
+      "parallelism",
+      "aggregate",
+      "hash join",
+      "nested loop",
+      "sort",
+      "node",
+      "tuple"
+    ]
+  },
+  "streaming-replication": {
+    "label": "流复制",
+    "keywords": [
+      "streaming replication",
+      "physical replication",
+      "wal sender",
+      "wal receiver",
+      "walsender",
+      "walreceiver",
       "standby",
-      "cluster",
-      "resiliency",
-      "availability"
+      "hot standby",
+      "primary",
+      "replica",
+      "replication slot"
+    ]
+  },
+  "logical-replication": {
+    "label": "逻辑复制",
+    "keywords": [
+      "logical replication",
+      "logical decoding",
+      "publication",
+      "subscription",
+      "replication origin",
+      "change data capture",
+      "cdc",
+      "decoding"
     ]
   },
   "backup-recovery": {
@@ -20,29 +71,43 @@
       "restore",
       "recovery",
       "pitr",
-      "wal",
+      "point in time recovery",
       "archive",
+      "archiving",
       "pgbackrest",
-      "barman"
+      "barman",
+      "base backup",
+      "incremental backup"
     ]
   },
-  "optimizer-performance": {
-    "label": "优化器与性能",
+  "high-availability": {
+    "label": "高可用",
     "keywords": [
-      "optimizer",
-      "planner",
-      "plan",
-      "explain",
+      "high availability",
+      "ha",
+      "failover",
+      "switchover",
+      "patroni",
+      "repmgr",
+      "cluster",
+      "resiliency",
+      "availability",
+      "disaster recovery"
+    ]
+  },
+  "performance": {
+    "label": "性能优化",
+    "keywords": [
       "performance",
-      "query",
+      "benchmark",
+      "latency",
+      "throughput",
+      "tuning",
+      "profiling",
+      "bottleneck",
       "index",
-      "statistics",
-      "join",
-      "joins",
-      "semi joins",
-      "semi-join",
-      "semijoin",
-      "cost"
+      "indexing",
+      "query performance"
     ]
   },
   "operations": {
@@ -51,11 +116,28 @@
       "monitoring",
       "observability",
       "vacuum",
+      "autovacuum",
       "maintenance",
       "upgrade",
       "migration",
       "operations",
-      "sre"
+      "sre",
+      "alerting"
+    ]
+  },
+  "storage": {
+    "label": "存储",
+    "keywords": [
+      "storage",
+      "heap",
+      "buffer",
+      "buffer manager",
+      "page",
+      "toast",
+      "freezing",
+      "visibility map",
+      "fsm",
+      "checkpoint"
     ]
   },
   "internals": {
@@ -64,23 +146,26 @@
       "internals",
       "mvcc",
       "locking",
-      "storage",
-      "executor",
-      "buffer",
+      "lock manager",
       "wal",
-      "logical decoding",
-      "freezing"
+      "transaction",
+      "snapshot",
+      "concurrency",
+      "backend",
+      "shared memory"
     ]
   },
   "extensions-ecosystem": {
     "label": "扩展与生态",
     "keywords": [
       "extension",
+      "extensions",
       "postgis",
       "pgvector",
       "fdw",
       "foreign data wrapper",
-      "ecosystem"
+      "ecosystem",
+      "foreign table"
     ]
   },
   "cloud-native": {
@@ -91,8 +176,10 @@
       "operator",
       "cloud",
       "container",
+      "containers",
       "cnpg",
-      "cloudnativepg"
+      "cloudnativepg",
+      "cloud native"
     ]
   },
   "security": {
@@ -104,7 +191,9 @@
       "encryption",
       "ssl",
       "tls",
-      "audit"
+      "audit",
+      "roles",
+      "privileges"
     ]
   }
 }
