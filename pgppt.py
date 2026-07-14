@@ -17,6 +17,7 @@ import sqlite3
 import sys
 import tempfile
 import time
+import unicodedata
 from typing import Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, unquote, urljoin, urlparse
@@ -55,6 +56,40 @@ DISCOVERY_PAGE_KEYWORDS = {
     "presentations",
     "slides",
 }
+WINDOWS_RESERVED_FILENAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    "COM1",
+    "COM2",
+    "COM3",
+    "COM4",
+    "COM5",
+    "COM6",
+    "COM7",
+    "COM8",
+    "COM9",
+    "LPT1",
+    "LPT2",
+    "LPT3",
+    "LPT4",
+    "LPT5",
+    "LPT6",
+    "LPT7",
+    "LPT8",
+    "LPT9",
+}
+GENERIC_ASSET_LABELS = {
+    "download",
+    "download slides",
+    "download the slides",
+    "presentation",
+    "presentations",
+    "slides",
+    "slides pdf",
+    "view slides",
+}
 
 
 def utcnow() -> str:
@@ -74,6 +109,45 @@ def slugify(value: str, fallback: str = "untitled") -> str:
     value = re.sub(r"[^A-Za-z0-9\u4e00-\u9fff.-]+", "-", value)
     value = re.sub(r"-{2,}", "-", value).strip("-.")
     return value[:120] or fallback
+
+
+def readable_text(value: str | None) -> str:
+    value = html.unescape(unquote(value or "")).strip()
+    suffix = Path(value).suffix.lower()
+    if suffix in ASSET_EXTENSIONS:
+        value = value[: -len(suffix)]
+    value = unicodedata.normalize("NFKC", value)
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
+
+
+def safe_filename_stem(value: str | None, fallback: str = "untitled", max_length: int = 160) -> str:
+    value = readable_text(value)
+    value = re.sub(r"[\x00-\x1f\x7f]+", " ", value)
+    value = re.sub(r'[<>:"/\\|?*]+', " ", value)
+    value = re.sub(r"\s+", " ", value).strip(" .-_")
+    if not value:
+        value = fallback
+    if value.upper() in WINDOWS_RESERVED_FILENAMES:
+        value = f"{value} slides"
+    if len(value) > max_length:
+        value = value[:max_length].rstrip(" .-_")
+    return value or fallback
+
+
+def asset_title_from_context(base_title: str, label: str, asset_url: str, asset_count: int) -> str:
+    base = readable_text(base_title) or infer_session_title(asset_url)
+    if asset_count <= 1:
+        return base
+
+    label_text = readable_text(label)
+    inferred = readable_text(infer_session_title(asset_url))
+    extra = label_text
+    if not extra or extra.lower() in GENERIC_ASSET_LABELS:
+        extra = inferred
+    if not extra or extra.lower() == base.lower() or extra.lower() in base.lower():
+        return base
+    return f"{base} - {extra}"
 
 
 def load_json(path: Path, default):
@@ -355,14 +429,21 @@ def download_asset(
     event_name: str,
     session_title: str,
 ) -> tuple[bool, str]:
+    existing_asset_id: int | None = None
     existing = conn.execute("select id, local_path, session_id from assets where file_url = ?", (url,)).fetchone()
     if existing:
+        existing_asset_id = int(existing["id"])
+        local_path = ROOT / existing["local_path"]
+        if local_path.exists():
+            if int(existing["session_id"]) != session_id:
+                conn.execute("update assets set session_id = ? where id = ?", (session_id, existing_asset_id))
+                conn.commit()
+            mark_session_checked(conn, session_id, "downloaded")
+            classify_session(conn, session_id)
+            return False, f"already exists: {existing['local_path']}"
         if int(existing["session_id"]) != session_id:
-            conn.execute("update assets set session_id = ? where id = ?", (session_id, int(existing["id"])))
+            conn.execute("update assets set session_id = ? where id = ?", (session_id, existing_asset_id))
             conn.commit()
-        mark_session_checked(conn, session_id, "downloaded")
-        classify_session(conn, session_id)
-        return False, f"already exists: {existing['local_path']}"
 
     try:
         with request_url(url) as resp:
@@ -372,11 +453,12 @@ def download_asset(
                 return False, f"skipped non-slide asset content-type={content_type}"
             event_dir = safe_event_dir(event_name)
             event_dir.mkdir(parents=True, exist_ok=True)
-            filename = slugify(session_title) + ext
+            filename_stem = safe_filename_stem(session_title)
+            filename = filename_stem + ext
             dest = event_dir / filename
             counter = 2
             while dest.exists():
-                dest = event_dir / f"{slugify(session_title)}-{counter}{ext}"
+                dest = event_dir / f"{filename_stem}-{counter}{ext}"
                 counter += 1
             with tempfile.NamedTemporaryFile(delete=False, dir=str(event_dir)) as tmp:
                 tmp_path = Path(tmp.name)
@@ -397,13 +479,28 @@ def download_asset(
     file_type = dest.suffix.lower().lstrip(".")
     now = utcnow()
     try:
-        conn.execute(
-            """
-            insert into assets(file_url, local_path, file_type, sha256, size_bytes, downloaded_at, created_at, session_id)
-            values(?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (url, str(dest.relative_to(ROOT)), file_type, digest, size, now, now, session_id),
-        )
+        if existing_asset_id is not None:
+            conn.execute(
+                """
+                update assets
+                set session_id = ?,
+                    local_path = ?,
+                    file_type = ?,
+                    sha256 = ?,
+                    size_bytes = ?,
+                    downloaded_at = ?
+                where id = ?
+                """,
+                (session_id, str(dest.relative_to(ROOT)), file_type, digest, size, now, existing_asset_id),
+            )
+        else:
+            conn.execute(
+                """
+                insert into assets(file_url, local_path, file_type, sha256, size_bytes, downloaded_at, created_at, session_id)
+                values(?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (url, str(dest.relative_to(ROOT)), file_type, digest, size, now, now, session_id),
+            )
     except sqlite3.IntegrityError:
         dest.unlink(missing_ok=True)
         row = conn.execute("select local_path from assets where sha256 = ?", (digest,)).fetchone()
@@ -641,7 +738,7 @@ def crawl_indico(
             messages.append(f"WAIT {title}: no slide attachments yet")
             continue
         for asset_url, label in assets:
-            asset_title = title if len(assets) == 1 else f"{title} {label or infer_session_title(asset_url)}"
+            asset_title = asset_title_from_context(title, label, asset_url, len(assets))
             ok, msg = download_asset(conn, session_id, asset_url, event, asset_title)
             if ok:
                 downloaded += 1
@@ -734,7 +831,7 @@ def crawl_wordpress(
             continue
 
         for asset_url, label in assets:
-            asset_title = page["title"] if len(assets) == 1 else f"{page['title']} {label or infer_session_title(asset_url)}"
+            asset_title = asset_title_from_context(page["title"], label, asset_url, len(assets))
             ok, msg = download_asset(conn, session_id, asset_url, event, asset_title)
             if ok:
                 downloaded += 1
@@ -823,7 +920,7 @@ def crawl_generic_site(
             messages.append(f"WAIT {title}: no slide assets yet")
             continue
         for asset_url, label in assets:
-            asset_title = title if len(assets) == 1 else f"{title} {label or infer_session_title(asset_url)}"
+            asset_title = asset_title_from_context(title, label, asset_url, len(assets))
             ok, msg = download_asset(conn, session_id, asset_url, event, asset_title)
             if ok:
                 downloaded += 1
@@ -885,7 +982,7 @@ def crawl_pgevents(
             continue
 
         for asset_url, label in assets:
-            asset_title = title if len(assets) == 1 else f"{title} {label or infer_session_title(asset_url)}"
+            asset_title = asset_title_from_context(title, label, asset_url, len(assets))
             ok, msg = download_asset(conn, session_id, asset_url, event, asset_title)
             if ok:
                 downloaded += 1
@@ -1192,7 +1289,7 @@ def ingest_url(conn: sqlite3.Connection, url: str, event_name: str | None, sessi
         return [f"WAIT no slide assets found; next check scheduled"]
 
     for asset_url, label in links:
-        asset_title = label or infer_session_title(asset_url)
+        asset_title = asset_title_from_context(title, label, asset_url, len(links))
         child_session_id = upsert_session(conn, event_id, asset_title, session_url=url, asset_status="found")
         ok, msg = download_asset(conn, child_session_id, asset_url, event, asset_title)
         messages.append(("OK " if ok else "SKIP ") + msg)
