@@ -525,20 +525,34 @@ def infer_session_title(url: str) -> str:
     return slugify(parts[-1] if parts else parsed.netloc).replace("-", " ")
 
 
-def request_url(url: str, timeout: int = 45):
+def configured_positive_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if not value:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        return default
+    return max(1, parsed)
+
+
+def request_url(url: str, timeout: int | None = None, retries: int | None = None):
+    timeout = timeout if timeout is not None else configured_positive_int("PGSH_REQUEST_TIMEOUT", 15)
+    retries = retries if retries is not None else configured_positive_int("PGSH_REQUEST_RETRIES", 2)
     sources = load_json(SOURCES_PATH, {})
     headers = {"User-Agent": sources.get("default_user_agent", "pgppt-harvester/0.1")}
     parsed = urlparse(url)
     safe_path = quote(parsed.path, safe="/%:@&=+$,;~")
     safe_url = parsed._replace(path=safe_path).geturl()
     last_error = None
-    for _ in range(3):
+    for attempt in range(retries):
         req = Request(safe_url, headers=headers)
         try:
             return urlopen(req, timeout=timeout)
         except URLError as exc:
             last_error = exc
-            time.sleep(1)
+            if attempt + 1 < retries:
+                time.sleep(1)
     if last_error:
         raise last_error
     return urlopen(Request(safe_url, headers=headers), timeout=timeout)
@@ -1158,8 +1172,6 @@ def crawl_wordpress(
     event = event_name or infer_event_name(site_url)
     event_id = upsert_event(conn, event, source_url=site_url, website_url=site_url)
     pages = discover_wordpress_pages(site_url)
-    if limit is not None:
-        pages = pages[:limit]
 
     messages = [f"discovered wordpress pages: {len(pages)}"]
     downloaded = 0
@@ -1168,7 +1180,12 @@ def crawl_wordpress(
     failed = 0
     candidate_pages = 0
 
+    def reached_limit() -> bool:
+        return limit is not None and (downloaded + skipped + missing + failed) >= limit
+
     for page in pages:
+        if reached_limit():
+            break
         links = []
         try:
             parser = LinkParser(page["link"])
@@ -1188,6 +1205,8 @@ def crawl_wordpress(
             schedule_sessions = discover_wordpress_schedule_sessions(page)
             if schedule_sessions:
                 for session in schedule_sessions:
+                    if reached_limit():
+                        break
                     session_id = upsert_session(
                         conn,
                         event_id,
@@ -1217,6 +1236,8 @@ def crawl_wordpress(
             continue
 
         for asset_url, label in assets:
+            if reached_limit():
+                break
             asset_title = asset_title_from_context(page["title"], label, asset_url, len(assets))
             ok, msg = download_asset(conn, session_id, asset_url, event, asset_title)
             if ok:
@@ -1852,6 +1873,16 @@ def adapter_summary(
     return messages
 
 
+def inferred_event_adapter_links(event_name: str) -> list[tuple[str, str]]:
+    links: list[tuple[str, str]] = []
+    normalized = event_name.lower()
+    year_match = re.search(r"\b(20\d{2})\b", event_name)
+    if year_match and "pgconf.dev" in normalized:
+        year = year_match.group(1)
+        links.append((f"https://www.pgevents.ca/events/pgconfdev{year}/sessions/", "inferred pgconf.dev sessions"))
+    return links
+
+
 def download_event_by_name(
     conn: sqlite3.Connection,
     event_query: str,
@@ -1869,6 +1900,7 @@ def download_event_by_name(
     seed_urls = [event["website_url"], event["source_url"]]
     candidate_links: list[tuple[str, str]] = []
     messages = [f"event: {event_name}"]
+    candidate_links.extend(inferred_event_adapter_links(event_name))
 
     for seed in [url for url in seed_urls if url]:
         candidate_links.append((seed, "event source"))

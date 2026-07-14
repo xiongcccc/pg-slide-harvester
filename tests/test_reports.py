@@ -1,9 +1,11 @@
 import io
+import os
 from pathlib import Path
 import sqlite3
 import sys
 import tempfile
 import unittest
+from urllib.error import URLError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -30,6 +32,48 @@ class FakeResponse(io.BytesIO):
 
 
 class AdapterTests(unittest.TestCase):
+    def test_request_url_uses_configurable_timeout_and_retries(self):
+        original_urlopen = pgppt.urlopen
+        original_sleep = pgppt.time.sleep
+        old_timeout = os.environ.get("PGSH_REQUEST_TIMEOUT")
+        old_retries = os.environ.get("PGSH_REQUEST_RETRIES")
+        calls = []
+        try:
+            os.environ["PGSH_REQUEST_TIMEOUT"] = "7"
+            os.environ["PGSH_REQUEST_RETRIES"] = "2"
+            pgppt.time.sleep = lambda seconds: None
+
+            def fake_urlopen(req, timeout):
+                calls.append(timeout)
+                raise URLError("temporary failure")
+
+            pgppt.urlopen = fake_urlopen
+
+            with self.assertRaises(URLError):
+                pgppt.request_url("https://example.com/test")
+
+            self.assertEqual(calls, [7, 7])
+        finally:
+            pgppt.urlopen = original_urlopen
+            pgppt.time.sleep = original_sleep
+            if old_timeout is None:
+                os.environ.pop("PGSH_REQUEST_TIMEOUT", None)
+            else:
+                os.environ["PGSH_REQUEST_TIMEOUT"] = old_timeout
+            if old_retries is None:
+                os.environ.pop("PGSH_REQUEST_RETRIES", None)
+            else:
+                os.environ["PGSH_REQUEST_RETRIES"] = old_retries
+
+    def test_pgconfdev_official_name_infers_pgevents_sessions_url(self):
+        self.assertEqual(
+            pgppt.inferred_event_adapter_links("PostgreSQL Development Conference 2026 (pgconf.dev)"),
+            [(
+                "https://www.pgevents.ca/events/pgconfdev2026/sessions/",
+                "inferred pgconf.dev sessions",
+            )],
+        )
+
     def test_eventyay_event_url_can_be_discovered_from_sponsorship_page(self):
         original_request_url = pgppt.request_url
         try:
@@ -109,6 +153,47 @@ class AdapterTests(unittest.TestCase):
             "Logical replication theory and concepts",
             "Pinning the Plan That Works: pg_plan_advice in PostgreSQL 19",
         ])
+
+    def test_wordpress_limit_counts_results_not_raw_pages(self):
+        original_discover_wordpress_pages = pgppt.discover_wordpress_pages
+        try:
+            pgppt.discover_wordpress_pages = lambda site_url: [
+                {
+                    "slug": "home",
+                    "title": "Home",
+                    "link": "https://2026.pghyd.in/",
+                    "content": "<p>Welcome</p>",
+                    "abstract": "",
+                },
+                {
+                    "slug": "schedule",
+                    "title": "Schedule",
+                    "link": "https://2026.pghyd.in/schedule/",
+                    "content": """
+                        <div data-widget_type="heading.default"><h4>10:00 to 10:30 AM</h4></div>
+                        <div data-widget_type="text-editor.default"><p>Logical replication theory and concepts</p></div>
+                        <div data-widget_type="text-editor.default"><p>PostgreSQL on Kubernetes: Lessons learned</p></div>
+                    """,
+                    "abstract": "",
+                },
+            ]
+
+            conn = memory_conn(self)
+            pgppt.init_db(conn)
+            messages = pgppt.crawl_wordpress(
+                conn,
+                "https://2026.pghyd.in/",
+                "Hyderabad Postgres Days 2026",
+                delay_seconds=0,
+                limit=1,
+            )
+
+            self.assertIn("WAIT Logical replication theory and concepts: no slides yet", messages)
+            self.assertIn("summary: downloaded=0, skipped=0, missing=1, failed=0", messages)
+            rows = conn.execute("select title from sessions order by id").fetchall()
+            self.assertEqual([row["title"] for row in rows], ["Logical replication theory and concepts"])
+        finally:
+            pgppt.discover_wordpress_pages = original_discover_wordpress_pages
 
     def test_postgresql_eu_schedule_url_can_be_discovered_from_event_site(self):
         original_request_url = pgppt.request_url
