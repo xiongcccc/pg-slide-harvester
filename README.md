@@ -255,11 +255,14 @@ Run the local checks:
 
 ```bash
 python3 -m py_compile pgppt.py
+python3 -m pip install -e .
+pgsh --help
+pg-slide-harvester --help
 python3 -m unittest discover -s tests -v
 ```
 
-The repository also includes GitHub Actions CI for the same checks across
-multiple Python versions.
+The repository also includes GitHub Actions CI for these checks across multiple
+Python versions, including the console entry points.
 
 ---
 
@@ -482,10 +485,14 @@ python3 pgppt.py report
 
 ```bash
 python3 -m py_compile pgppt.py
+python3 -m pip install -e .
+pgsh --help
+pg-slide-harvester --help
 python3 -m unittest discover -s tests -v
 ```
 
-仓库已包含 GitHub Actions CI，会在多个 Python 版本上运行同样的检查。
+仓库已包含 GitHub Actions CI，会在多个 Python 版本上运行同样的检查，
+包括 console entrypoint。
 
 ## License
 

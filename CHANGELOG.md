@@ -12,3 +12,4 @@ All notable changes to `pg-slide-harvester` will be documented in this file.
 - Generate full snapshot reports and per-run download reports.
 - Record source URLs for downloaded assets.
 - Provide a lightweight standard-library-only CLI.
+- Validate `pgsh` and `pg-slide-harvester` console entry points in CI.
