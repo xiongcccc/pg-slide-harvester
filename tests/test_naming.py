@@ -59,6 +59,20 @@ class NamingTests(unittest.TestCase):
         )
         self.assertEqual(title, "PostgreSQL Backup Patterns - Demo Notes")
 
+    def test_book_of_abstracts_is_not_treated_as_slide_asset(self):
+        self.assertFalse(
+            pgppt.is_probably_slide_asset(
+                "https://indico.example.org/event/1/book-of-abstracts.pdf",
+                "Book of abstracts",
+            )
+        )
+        self.assertTrue(
+            pgppt.is_probably_slide_asset(
+                "https://indico.example.org/event/1/contributions/2/slides.pdf",
+                "Slides",
+            )
+        )
+
     def test_upsert_session_can_backfill_abstract(self):
         conn = memory_conn(self)
         pgppt.init_db(conn)

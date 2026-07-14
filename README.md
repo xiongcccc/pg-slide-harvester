@@ -165,10 +165,10 @@ The project generates two kinds of reports:
 Run reports are created by download-oriented commands such as `download-event`,
 `ingest`, `crawl-pgevents`, `crawl-generic`, and `tick`.
 
-Each run report includes the run command, date, action, event, session, tags,
-local file path, source URL, size, and timestamps. Actions include
+Each run report includes the run command, date, action, message, event, session,
+tags, local file path, source URL, size, and timestamps. Actions include
 `downloaded`, `already_exists`, and `duplicate_content`, so you can distinguish
-newly downloaded files from files that were already present locally.
+newly downloaded files, previously downloaded files, and duplicate URLs or files.
 
 ### Topic Archive
 
@@ -223,6 +223,9 @@ tracked with a status:
 - `missing`: no public material found yet.
 - `found`: material link found.
 - `downloaded`: file downloaded.
+- `duplicate_content`: URL or file content already exists under another asset.
+- `downloaded_without_asset`: defensive report-only status for old metadata that
+  says downloaded but has no local asset row.
 - `failed`: download failed.
 - `login_required`: login or permission required.
 
@@ -397,9 +400,10 @@ python3 pgppt.py list sessions
 运行报告会由下载类命令自动生成，例如 `download-event`、`ingest`、
 `crawl-pgevents`、`crawl-generic` 和 `tick`。
 
-每份运行报告包含本次命令、日期、动作、会议、session、分类、文件路径、源 URL、
-文件大小和时间戳。动作包括 `downloaded`、`already_exists`、
-`duplicate_content`，因此可以区分“今天新下载的文件”和“本地之前已经存在的文件”。
+每份运行报告包含本次命令、日期、动作、消息、会议、session、分类、文件路径、
+源 URL、文件大小和时间戳。动作包括 `downloaded`、`already_exists`、
+`duplicate_content`，因此可以区分“今天新下载的文件”、“本地之前已经存在的文件”
+和“重复 URL/重复内容”。
 
 ### 主题归档
 
@@ -453,6 +457,9 @@ URL slug 风格的连字符/下划线。
 - `missing`：暂未发现资料。
 - `found`：已发现资料链接。
 - `downloaded`：已下载。
+- `duplicate_content`：URL 或文件内容已经作为另一份资产存在。
+- `downloaded_without_asset`：报告中的防御性状态，用于提示旧元数据里显示
+  downloaded，但没有对应本地资产记录。
 - `failed`：下载失败。
 - `login_required`：需要登录或没有权限。
 

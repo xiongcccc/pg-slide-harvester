@@ -51,6 +51,8 @@ NON_SLIDE_ASSET_KEYWORDS = {
     "registration",
     "cfp",
     "call-for",
+    "book-of-abstracts",
+    "abstracts",
     "code-of-conduct",
     "terms",
     "invoice",
@@ -277,12 +279,14 @@ def init_db(conn: sqlite3.Connection) -> None:
             session_id integer not null references sessions(id) on delete cascade,
             status text not null,
             message text,
+            source_url text,
             created_at text not null,
             primary key(run_id, session_id, status)
         );
         """
     )
     ensure_column(conn, "run_assets", "source_url", "text")
+    ensure_column(conn, "run_sessions", "source_url", "text")
     conn.execute(
         """
         insert or ignore into asset_sources(file_url, asset_id, first_seen_at, last_seen_at, last_status)
@@ -378,6 +382,7 @@ def record_run_session(
     session_id: int | None,
     status: str,
     message: str = "",
+    source_url: str | None = None,
     run_id: int | None = None,
 ) -> None:
     run_id = run_id if run_id is not None else ACTIVE_RUN_ID
@@ -385,13 +390,14 @@ def record_run_session(
         return
     conn.execute(
         """
-        insert into run_sessions(run_id, session_id, status, message, created_at)
-        values(?, ?, ?, ?, ?)
+        insert into run_sessions(run_id, session_id, status, message, source_url, created_at)
+        values(?, ?, ?, ?, ?, ?)
         on conflict(run_id, session_id, status) do update set
             message = excluded.message,
+            source_url = coalesce(excluded.source_url, run_sessions.source_url),
             created_at = excluded.created_at
         """,
-        (run_id, session_id, status, message, utcnow()),
+        (run_id, session_id, status, message, source_url, utcnow()),
     )
     conn.commit()
 
@@ -599,14 +605,21 @@ def download_asset(
         existing_asset_id = int(existing["id"])
         local_path = ROOT / existing["local_path"]
         if local_path.exists():
-            if int(existing["session_id"]) != session_id:
-                conn.execute("update assets set session_id = ? where id = ?", (session_id, existing_asset_id))
-                conn.commit()
-            mark_session_checked(conn, session_id, "downloaded")
+            same_session = int(existing["session_id"]) == session_id
+            status = "downloaded" if same_session else "duplicate_content"
+            mark_session_checked(
+                conn,
+                session_id,
+                status,
+                message=f"{status}: {existing['local_path']}",
+                source_url=url,
+            )
             classify_session(conn, session_id)
-            record_asset_source(conn, existing_asset_id, url, "already_exists")
-            record_run_asset(conn, existing_asset_id, "already_exists", existing["local_path"], source_url=url)
-            return False, f"already exists: {existing['local_path']}"
+            action = "already_exists" if same_session else "duplicate_content"
+            record_asset_source(conn, existing_asset_id, url, action)
+            if same_session:
+                record_run_asset(conn, existing_asset_id, action, existing["local_path"], source_url=url)
+            return False, f"{action}: {existing['local_path']}"
         if int(existing["session_id"]) != session_id:
             conn.execute("update assets set session_id = ? where id = ?", (session_id, existing_asset_id))
             conn.commit()
@@ -665,12 +678,22 @@ def download_asset(
             existing_asset_id = int(conn.execute("select last_insert_rowid() as id").fetchone()["id"])
     except sqlite3.IntegrityError:
         dest.unlink(missing_ok=True)
-        row = conn.execute("select id, local_path from assets where sha256 = ?", (digest,)).fetchone()
-        mark_session_checked(conn, session_id, "downloaded")
+        row = conn.execute("select id, local_path, session_id from assets where sha256 = ?", (digest,)).fetchone()
+        same_session = bool(row and int(row["session_id"]) == session_id)
+        status = "downloaded" if same_session else "duplicate_content"
+        duplicate_path = row["local_path"] if row else digest
+        mark_session_checked(
+            conn,
+            session_id,
+            status,
+            message=f"duplicate content: {duplicate_path}",
+            source_url=url,
+        )
         classify_session(conn, session_id)
         if row:
             record_asset_source(conn, int(row["id"]), url, "duplicate_content")
-            record_run_asset(conn, int(row["id"]), "duplicate_content", row["local_path"], source_url=url)
+            if same_session:
+                record_run_asset(conn, int(row["id"]), "duplicate_content", row["local_path"], source_url=url)
         return False, f"duplicate content: {row['local_path'] if row else digest}"
 
     mark_session_checked(conn, session_id, "downloaded")
@@ -696,7 +719,13 @@ def compute_next_check(status: str, check_count: int) -> str:
     return (now + delta).isoformat()
 
 
-def mark_session_checked(conn: sqlite3.Connection, session_id: int, status: str) -> None:
+def mark_session_checked(
+    conn: sqlite3.Connection,
+    session_id: int,
+    status: str,
+    message: str = "",
+    source_url: str | None = None,
+) -> None:
     row = conn.execute("select check_count from sessions where id = ?", (session_id,)).fetchone()
     check_count = int(row["check_count"] if row else 0) + 1
     conn.execute(
@@ -708,7 +737,7 @@ def mark_session_checked(conn: sqlite3.Connection, session_id: int, status: str)
         (status, utcnow(), compute_next_check(status, check_count), check_count, utcnow(), session_id),
     )
     conn.commit()
-    record_run_session(conn, session_id, status)
+    record_run_session(conn, session_id, status, message=message, source_url=source_url)
 
 
 def keyword_matches(text: str, keyword: str) -> bool:
@@ -1657,7 +1686,10 @@ def report(conn: sqlite3.Connection) -> tuple[Path, Path]:
         select
             e.name as event_name,
             s.title as session_title,
-            s.asset_status,
+            case
+                when s.asset_status = 'downloaded' and a.id is null then 'downloaded_without_asset'
+                else s.asset_status
+            end as asset_status,
             s.last_checked_at,
             s.next_check_at,
             a.local_path,
@@ -1798,7 +1830,7 @@ def run_report(conn: sqlite3.Connection, run_id: int) -> tuple[Path, Path, int]:
             e.name as event_name,
             s.title as session_title,
             '' as local_path,
-            s.session_url as file_url,
+            coalesce(rs.source_url, s.session_url) as file_url,
             '' as file_type,
             '' as size_bytes,
             '' as downloaded_at,
@@ -1843,6 +1875,7 @@ def run_report(conn: sqlite3.Connection, run_id: int) -> tuple[Path, Path, int]:
                 "run_date",
                 "command",
                 "action",
+                "message",
                 "event",
                 "session",
                 "tags",
@@ -1861,6 +1894,7 @@ def run_report(conn: sqlite3.Connection, run_id: int) -> tuple[Path, Path, int]:
                     run_date,
                     run["command"],
                     row["action"],
+                    row["message"] or "",
                     row["event_name"],
                     row["session_title"],
                     row["tags"] or "",
@@ -1884,6 +1918,7 @@ def run_report(conn: sqlite3.Connection, run_id: int) -> tuple[Path, Path, int]:
         items.append(
             "<tr>"
             f"<td>{html.escape(row['action'])}</td>"
+            f"<td>{html.escape(row['message'] or '')}</td>"
             f"<td>{html.escape(row['event_name'])}</td>"
             f"<td>{html.escape(row['session_title'])}</td>"
             f"<td>{html.escape(row['tags'] or '')}</td>"
@@ -1919,7 +1954,7 @@ def run_report(conn: sqlite3.Connection, run_id: int) -> tuple[Path, Path, int]:
   </div>
   <table>
     <thead>
-      <tr><th>Action</th><th>Event</th><th>Session</th><th>Tags</th><th>File</th><th>Size</th><th>Recorded At</th></tr>
+      <tr><th>Action</th><th>Message</th><th>Event</th><th>Session</th><th>Tags</th><th>File</th><th>Size</th><th>Recorded At</th></tr>
     </thead>
     <tbody>
       {''.join(items)}
