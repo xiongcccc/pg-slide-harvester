@@ -8,3 +8,8 @@ docs/project-context.md
 .DS_Store
 *.pyc
 __pycache__/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/

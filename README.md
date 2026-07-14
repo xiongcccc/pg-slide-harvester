@@ -17,6 +17,8 @@
   <a href="#快速开始">快速开始</a> ·
   <a href="#reports">Reports</a> ·
   <a href="#报告">报告</a> ·
+  <a href="#development">Development</a> ·
+  <a href="#开发">开发</a> ·
   <a href="#license">License</a>
 </p>
 
@@ -71,6 +73,17 @@ adapter as new platforms are encountered.
 ### Quick Start
 
 ```bash
+python3 -m pip install -e .
+pgsh init
+pgsh scan-official
+pgsh list events
+pgsh download-event "CERN PGDay 2026"
+pgsh report
+```
+
+You can also run the script directly without installing it:
+
+```bash
 python3 pgppt.py init
 python3 pgppt.py scan-official
 python3 pgppt.py list events
@@ -94,6 +107,16 @@ reports/runs/2026-07-14/pgconf.dev-2026-run-12.csv
 ```
 
 Local archives, reports, and SQLite state are ignored by git.
+
+To keep data outside the source checkout, set `PGSH_HOME`:
+
+```bash
+PGSH_HOME=/path/to/pg-slide-archive pgsh init
+```
+
+Editable installation uses the standard Python build backend. If your Python
+environment does not include `setuptools`, install it first or use the direct
+`python3 pgppt.py ...` form.
 
 ### Common Commands
 
@@ -226,6 +249,18 @@ python3 pgppt.py report
 - Add optional recurring job setup instructions.
 - Expand automated tests.
 
+### Development
+
+Run the local checks:
+
+```bash
+python3 -m py_compile pgppt.py
+python3 -m unittest discover -s tests -v
+```
+
+The repository also includes GitHub Actions CI for the same checks across
+multiple Python versions.
+
 ---
 
 ## 中文说明
@@ -268,6 +303,17 @@ PostgreSQL 生态会议中的公开 PPT/PDF 资料。它会从 PostgreSQL 官方
 ### 快速开始
 
 ```bash
+python3 -m pip install -e .
+pgsh init
+pgsh scan-official
+pgsh list events
+pgsh download-event "CERN PGDay 2026"
+pgsh report
+```
+
+也可以不安装，直接运行脚本：
+
+```bash
 python3 pgppt.py init
 python3 pgppt.py scan-official
 python3 pgppt.py list events
@@ -291,6 +337,15 @@ reports/runs/2026-07-14/pgconf.dev-2026-run-12.csv
 ```
 
 本地归档、报告和 SQLite 状态默认不会提交到 git。
+
+如果希望把数据放到源码目录之外，可以设置 `PGSH_HOME`：
+
+```bash
+PGSH_HOME=/path/to/pg-slide-archive pgsh init
+```
+
+可编辑安装使用标准 Python 构建后端。如果你的 Python 环境缺少 `setuptools`，
+可以先安装它，或者继续使用 `python3 pgppt.py ...` 的直接运行方式。
 
 ### 常用命令
 
@@ -420,6 +475,17 @@ python3 pgppt.py report
 - 改进主题分类质量。
 - 增加可选的定时任务安装说明。
 - 增加更完整的测试覆盖。
+
+### 开发
+
+本地检查命令：
+
+```bash
+python3 -m py_compile pgppt.py
+python3 -m unittest discover -s tests -v
+```
+
+仓库已包含 GitHub Actions CI，会在多个 Python 版本上运行同样的检查。
 
 ## License
 

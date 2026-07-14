@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pg-slide-harvester"
+version = "0.1.0"
+description = "A lightweight PostgreSQL conference slide harvester and topic-based local archive."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "xiongcccc" }
+]
+keywords = ["postgresql", "slides", "conference", "crawler", "archive"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Database",
+  "Topic :: Utilities"
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/xiongcccc/pg-slide-harvester"
+Repository = "https://github.com/xiongcccc/pg-slide-harvester"
+Issues = "https://github.com/xiongcccc/pg-slide-harvester/issues"
+
+[project.scripts]
+pg-slide-harvester = "pgppt:main"
+pgsh = "pgppt:main"
+
+[tool.setuptools]
+py-modules = ["pgppt"]
+
+[tool.ruff]
+line-length = 140
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]

@@ -24,7 +24,20 @@ from urllib.parse import quote, unquote, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 
-ROOT = Path(__file__).resolve().parent
+def default_root() -> Path:
+    configured = os.environ.get("PGSH_HOME")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    module_root = Path(__file__).resolve().parent
+    if (module_root / "config").exists():
+        return module_root
+    cwd = Path.cwd()
+    if (cwd / "config").exists():
+        return cwd
+    return module_root
+
+
+ROOT = default_root()
 DB_PATH = ROOT / "data" / "pgppt.sqlite"
 CATEGORIES_PATH = ROOT / "config" / "categories.json"
 SOURCES_PATH = ROOT / "config" / "sources.json"
@@ -218,6 +231,14 @@ def init_db(conn: sqlite3.Connection) -> None:
             unique(sha256)
         );
 
+        create table if not exists asset_sources (
+            file_url text primary key,
+            asset_id integer not null references assets(id) on delete cascade,
+            first_seen_at text not null,
+            last_seen_at text not null,
+            last_status text not null
+        );
+
         create table if not exists tags (
             id integer primary key,
             slug text not null unique,
@@ -245,13 +266,37 @@ def init_db(conn: sqlite3.Connection) -> None:
             run_id integer not null references crawl_runs(id) on delete cascade,
             asset_id integer not null references assets(id) on delete cascade,
             action text not null,
+            source_url text,
             message text,
             created_at text not null,
             primary key(run_id, asset_id, action)
         );
+
+        create table if not exists run_sessions (
+            run_id integer not null references crawl_runs(id) on delete cascade,
+            session_id integer not null references sessions(id) on delete cascade,
+            status text not null,
+            message text,
+            created_at text not null,
+            primary key(run_id, session_id, status)
+        );
+        """
+    )
+    ensure_column(conn, "run_assets", "source_url", "text")
+    conn.execute(
+        """
+        insert or ignore into asset_sources(file_url, asset_id, first_seen_at, last_seen_at, last_status)
+        select file_url, id, created_at, downloaded_at, 'backfilled'
+        from assets
         """
     )
     conn.commit()
+
+
+def ensure_column(conn: sqlite3.Connection, table: str, column: str, spec: str) -> None:
+    existing = {row["name"] for row in conn.execute(f"pragma table_info({table})")}
+    if column not in existing:
+        conn.execute(f"alter table {table} add column {column} {spec}")
 
 
 def ensure_tags(conn: sqlite3.Connection) -> None:
@@ -290,6 +335,7 @@ def record_run_asset(
     asset_id: int | None,
     action: str,
     message: str = "",
+    source_url: str | None = None,
     run_id: int | None = None,
 ) -> None:
     run_id = run_id if run_id is not None else ACTIVE_RUN_ID
@@ -297,13 +343,55 @@ def record_run_asset(
         return
     conn.execute(
         """
-        insert into run_assets(run_id, asset_id, action, message, created_at)
-        values(?, ?, ?, ?, ?)
+        insert into run_assets(run_id, asset_id, action, source_url, message, created_at)
+        values(?, ?, ?, ?, ?, ?)
         on conflict(run_id, asset_id, action) do update set
+            source_url = coalesce(excluded.source_url, run_assets.source_url),
             message = excluded.message,
             created_at = excluded.created_at
         """,
-        (run_id, asset_id, action, message, utcnow()),
+        (run_id, asset_id, action, source_url, message, utcnow()),
+    )
+    conn.commit()
+
+
+def record_asset_source(conn: sqlite3.Connection, asset_id: int | None, file_url: str, status: str) -> None:
+    if asset_id is None:
+        return
+    now = utcnow()
+    conn.execute(
+        """
+        insert into asset_sources(file_url, asset_id, first_seen_at, last_seen_at, last_status)
+        values(?, ?, ?, ?, ?)
+        on conflict(file_url) do update set
+            asset_id = excluded.asset_id,
+            last_seen_at = excluded.last_seen_at,
+            last_status = excluded.last_status
+        """,
+        (file_url, asset_id, now, now, status),
+    )
+    conn.commit()
+
+
+def record_run_session(
+    conn: sqlite3.Connection,
+    session_id: int | None,
+    status: str,
+    message: str = "",
+    run_id: int | None = None,
+) -> None:
+    run_id = run_id if run_id is not None else ACTIVE_RUN_ID
+    if run_id is None or session_id is None:
+        return
+    conn.execute(
+        """
+        insert into run_sessions(run_id, session_id, status, message, created_at)
+        values(?, ?, ?, ?, ?)
+        on conflict(run_id, session_id, status) do update set
+            message = excluded.message,
+            created_at = excluded.created_at
+        """,
+        (run_id, session_id, status, message, utcnow()),
     )
     conn.commit()
 
@@ -516,7 +604,8 @@ def download_asset(
                 conn.commit()
             mark_session_checked(conn, session_id, "downloaded")
             classify_session(conn, session_id)
-            record_run_asset(conn, existing_asset_id, "already_exists", existing["local_path"])
+            record_asset_source(conn, existing_asset_id, url, "already_exists")
+            record_run_asset(conn, existing_asset_id, "already_exists", existing["local_path"], source_url=url)
             return False, f"already exists: {existing['local_path']}"
         if int(existing["session_id"]) != session_id:
             conn.execute("update assets set session_id = ? where id = ?", (session_id, existing_asset_id))
@@ -580,12 +669,14 @@ def download_asset(
         mark_session_checked(conn, session_id, "downloaded")
         classify_session(conn, session_id)
         if row:
-            record_run_asset(conn, int(row["id"]), "duplicate_content", row["local_path"])
+            record_asset_source(conn, int(row["id"]), url, "duplicate_content")
+            record_run_asset(conn, int(row["id"]), "duplicate_content", row["local_path"], source_url=url)
         return False, f"duplicate content: {row['local_path'] if row else digest}"
 
     mark_session_checked(conn, session_id, "downloaded")
     classify_session(conn, session_id)
-    record_run_asset(conn, existing_asset_id, "downloaded", str(dest.relative_to(ROOT)))
+    record_asset_source(conn, existing_asset_id, url, "downloaded")
+    record_run_asset(conn, existing_asset_id, "downloaded", str(dest.relative_to(ROOT)), source_url=url)
     conn.commit()
     return True, f"downloaded: {dest.relative_to(ROOT)}"
 
@@ -617,6 +708,7 @@ def mark_session_checked(conn: sqlite3.Connection, session_id: int, status: str)
         (status, utcnow(), compute_next_check(status, check_count), check_count, utcnow(), session_id),
     )
     conn.commit()
+    record_run_session(conn, session_id, status)
 
 
 def keyword_matches(text: str, keyword: str) -> bool:
@@ -1671,7 +1763,7 @@ def run_report(conn: sqlite3.Connection, run_id: int) -> tuple[Path, Path, int]:
         raise ValueError(f"run not found: {run_id}")
     started = parse_time(run["started_at"]) or dt.datetime.now(dt.timezone.utc)
     run_date = started.astimezone().date().isoformat()
-    rows = conn.execute(
+    asset_rows = conn.execute(
         """
         select
             ra.action,
@@ -1680,7 +1772,7 @@ def run_report(conn: sqlite3.Connection, run_id: int) -> tuple[Path, Path, int]:
             e.name as event_name,
             s.title as session_title,
             a.local_path,
-            a.file_url,
+            coalesce(ra.source_url, a.file_url) as file_url,
             a.file_type,
             a.size_bytes,
             a.downloaded_at,
@@ -1697,6 +1789,39 @@ def run_report(conn: sqlite3.Connection, run_id: int) -> tuple[Path, Path, int]:
         """,
         (run_id,),
     ).fetchall()
+    session_rows = conn.execute(
+        """
+        select
+            rs.status as action,
+            rs.message,
+            rs.created_at as recorded_at,
+            e.name as event_name,
+            s.title as session_title,
+            '' as local_path,
+            s.session_url as file_url,
+            '' as file_type,
+            '' as size_bytes,
+            '' as downloaded_at,
+            group_concat(t.label, ', ') as tags
+        from run_sessions rs
+        join sessions s on s.id = rs.session_id
+        join events e on e.id = s.event_id
+        left join session_tags st on st.session_id = s.id
+        left join tags t on t.id = st.tag_id
+        where rs.run_id = ?
+          and not exists (
+              select 1
+              from run_assets ra
+              join assets a on a.id = ra.asset_id
+              where ra.run_id = rs.run_id
+                and a.session_id = rs.session_id
+          )
+        group by rs.run_id, rs.session_id, rs.status
+        order by rs.created_at, e.name, s.title
+        """,
+        (run_id,),
+    ).fetchall()
+    rows = list(asset_rows) + list(session_rows)
     event_names = sorted({row["event_name"] for row in rows if row["event_name"]})
     if len(event_names) == 1:
         event_part = report_slug(event_names[0])
@@ -1751,8 +1876,11 @@ def run_report(conn: sqlite3.Connection, run_id: int) -> tuple[Path, Path, int]:
     items = []
     for row in rows:
         local = row["local_path"]
-        link_target = os.path.relpath(ROOT / local, report_dir)
-        link = f'<a href="{html.escape(link_target)}">{html.escape(local)}</a>'
+        if local:
+            link_target = os.path.relpath(ROOT / local, report_dir)
+            link = f'<a href="{html.escape(link_target)}">{html.escape(local)}</a>'
+        else:
+            link = html.escape(row["file_url"] or "")
         items.append(
             "<tr>"
             f"<td>{html.escape(row['action'])}</td>"

@@ -10,6 +10,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pgppt  # noqa: E402
 
 
+def memory_conn(test_case):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    test_case.addCleanup(conn.close)
+    return conn
+
+
 class FakeResponse(io.BytesIO):
     def __init__(self, body: bytes, content_type: str = "application/pdf"):
         super().__init__(body)
@@ -53,8 +60,7 @@ class NamingTests(unittest.TestCase):
         self.assertEqual(title, "PostgreSQL Backup Patterns - Demo Notes")
 
     def test_upsert_session_can_backfill_abstract(self):
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = memory_conn(self)
         pgppt.init_db(conn)
         event_id = pgppt.upsert_event(conn, "PGConf.dev 2026")
         session_id = pgppt.upsert_session(conn, event_id, "Query Planning")
@@ -77,8 +83,7 @@ class NamingTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 pgppt.ROOT = Path(tmp)
                 pgppt.request_url = lambda url: FakeResponse(body)
-                conn = sqlite3.connect(":memory:")
-                conn.row_factory = sqlite3.Row
+                conn = memory_conn(self)
                 pgppt.init_db(conn)
                 pgppt.ensure_tags(conn)
                 event_id = pgppt.upsert_event(conn, "PGConf.dev 2026")
@@ -129,8 +134,7 @@ class NamingTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 pgppt.ROOT = Path(tmp)
                 pgppt.request_url = lambda url: FakeResponse(body)
-                conn = sqlite3.connect(":memory:")
-                conn.row_factory = sqlite3.Row
+                conn = memory_conn(self)
                 pgppt.init_db(conn)
                 pgppt.ensure_tags(conn)
                 event_id = pgppt.upsert_event(conn, "PGConf.dev 2026")
@@ -167,8 +171,7 @@ class NamingTests(unittest.TestCase):
                 old_path.parent.mkdir(parents=True)
                 old_path.write_bytes(b"%PDF-1.4 old path\n")
 
-                conn = sqlite3.connect(":memory:")
-                conn.row_factory = sqlite3.Row
+                conn = memory_conn(self)
                 pgppt.init_db(conn)
                 pgppt.ensure_tags(conn)
                 event_id = pgppt.upsert_event(conn, "PGConf.dev 2026")
@@ -218,8 +221,7 @@ class NamingTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 pgppt.ROOT = Path(tmp)
                 pgppt.request_url = lambda url: FakeResponse(body)
-                conn = sqlite3.connect(":memory:")
-                conn.row_factory = sqlite3.Row
+                conn = memory_conn(self)
                 pgppt.init_db(conn)
                 pgppt.ensure_tags(conn)
                 run_id = pgppt.begin_run(conn, 'download-event "PGConf.dev 2026"')
