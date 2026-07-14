@@ -1,0 +1,10 @@
+archive/
+data/*.sqlite
+reports/
+outputs/
+work/
+docs/history.md
+docs/project-context.md
+.DS_Store
+*.pyc
+__pycache__/

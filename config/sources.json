@@ -1,0 +1,13 @@
+{
+  "official_events": [
+    "https://www.postgresql.org/about/events/",
+    "https://www.postgresql.org/about/eventarchive/"
+  ],
+  "asset_extensions": [
+    ".pdf",
+    ".ppt",
+    ".pptx",
+    ".odp"
+  ],
+  "default_user_agent": "pgppt-harvester/0.1 (+local personal archive)"
+}

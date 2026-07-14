@@ -1,0 +1,110 @@
+{
+  "high-availability": {
+    "label": "高可用",
+    "keywords": [
+      "high availability",
+      "ha",
+      "failover",
+      "replication",
+      "patroni",
+      "standby",
+      "cluster",
+      "resiliency",
+      "availability"
+    ]
+  },
+  "backup-recovery": {
+    "label": "备份恢复",
+    "keywords": [
+      "backup",
+      "restore",
+      "recovery",
+      "pitr",
+      "wal",
+      "archive",
+      "pgbackrest",
+      "barman"
+    ]
+  },
+  "optimizer-performance": {
+    "label": "优化器与性能",
+    "keywords": [
+      "optimizer",
+      "planner",
+      "plan",
+      "explain",
+      "performance",
+      "query",
+      "index",
+      "statistics",
+      "join",
+      "joins",
+      "semi joins",
+      "semi-join",
+      "semijoin",
+      "cost"
+    ]
+  },
+  "operations": {
+    "label": "运维",
+    "keywords": [
+      "monitoring",
+      "observability",
+      "vacuum",
+      "maintenance",
+      "upgrade",
+      "migration",
+      "operations",
+      "sre"
+    ]
+  },
+  "internals": {
+    "label": "内核原理",
+    "keywords": [
+      "internals",
+      "mvcc",
+      "locking",
+      "storage",
+      "executor",
+      "buffer",
+      "wal",
+      "logical decoding",
+      "freezing"
+    ]
+  },
+  "extensions-ecosystem": {
+    "label": "扩展与生态",
+    "keywords": [
+      "extension",
+      "postgis",
+      "pgvector",
+      "fdw",
+      "foreign data wrapper",
+      "ecosystem"
+    ]
+  },
+  "cloud-native": {
+    "label": "云原生",
+    "keywords": [
+      "kubernetes",
+      "k8s",
+      "operator",
+      "cloud",
+      "container",
+      "cnpg",
+      "cloudnativepg"
+    ]
+  },
+  "security": {
+    "label": "安全",
+    "keywords": [
+      "security",
+      "authentication",
+      "authorization",
+      "encryption",
+      "ssl",
+      "tls",
+      "audit"
+    ]
+  }
+}
