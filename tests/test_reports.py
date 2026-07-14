@@ -90,6 +90,26 @@ class AdapterTests(unittest.TestCase):
         finally:
             pgppt.request_url = original_request_url
 
+    def test_discover_wordpress_schedule_sessions_from_elementor_widgets(self):
+        page = {
+            "slug": "schedule",
+            "title": "Schedule",
+            "link": "https://2026.pghyd.in/schedule/",
+            "content": """
+                <div data-widget_type="heading.default"><h4>10:00 to 10:30 AM</h4></div>
+                <div data-widget_type="text-editor.default"><p>Logical replication theory and concepts</p></div>
+                <div data-widget_type="text-editor.default"><p>Tea Break</p></div>
+                <div data-widget_type="html.default">Pinning the Plan That Works: pg_plan_advice in PostgreSQL 19</div>
+            """,
+        }
+
+        sessions = pgppt.discover_wordpress_schedule_sessions(page)
+
+        self.assertEqual([session["title"] for session in sessions], [
+            "Logical replication theory and concepts",
+            "Pinning the Plan That Works: pg_plan_advice in PostgreSQL 19",
+        ])
+
     def test_postgresql_eu_schedule_url_can_be_discovered_from_event_site(self):
         original_request_url = pgppt.request_url
         try:

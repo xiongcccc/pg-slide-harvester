@@ -1061,6 +1061,93 @@ def page_is_discovery_candidate(page: dict[str, str]) -> bool:
     return any(keyword in text for keyword in DISCOVERY_PAGE_KEYWORDS)
 
 
+def elementor_widget_texts(content: str) -> list[str]:
+    texts: list[str] = []
+    for match in re.finditer(
+        r'<div\b[^>]*data-widget_type="(?:html|text-editor|heading)\.default"[^>]*>.*?(?=<div\b[^>]*data-widget_type=|<div class="elementor-element|</body>|</html>|$)',
+        content,
+        flags=re.DOTALL,
+    ):
+        chunk = match.group(0)
+        chunk = re.sub(r"<script.*?</script>", " ", chunk, flags=re.DOTALL | re.IGNORECASE)
+        chunk = re.sub(r"<style.*?</style>", " ", chunk, flags=re.DOTALL | re.IGNORECASE)
+        chunk = re.sub(r"<svg.*?</svg>", " ", chunk, flags=re.DOTALL | re.IGNORECASE)
+        chunk = re.sub(r"<[^>]+>", " ", chunk)
+        chunk = readable_text(re.sub(r'\bdata-widget_type="[^"]+">', " ", chunk))
+        if chunk:
+            texts.append(chunk)
+    return texts
+
+
+def schedule_text_is_session_title(text: str) -> bool:
+    normalized = readable_text(text)
+    if not normalized or len(normalized) < 8:
+        return False
+    lowered = normalized.lower()
+    if re.search(r"\b\d{1,2}[:.]\d{2}\b|\b\d{1,2}\s*(?:am|pm)\b", lowered):
+        return False
+    blocked = {
+        "time",
+        "tentative schedule",
+        "hyderabad pg days 2026",
+        "hall - 1",
+        "hall - 2",
+        "hall - 3",
+        "hall 1",
+        "hall 2",
+        "hall 3",
+        "tea break",
+        "break/networking",
+        "group photograph | lunch break",
+        "closing remarks",
+        "evening reception",
+    }
+    if lowered in blocked:
+        return False
+    if any(keyword in lowered for keyword in ("lunch", "welcome & opening", "training - lunch")):
+        return False
+    return any(
+        keyword in lowered
+        for keyword in (
+            "postgres",
+            "postgresql",
+            "oracle",
+            "vacuum",
+            "replication",
+            "dba",
+            "sql",
+            "vector",
+            "database",
+            "lightning talks",
+            "keynote",
+        )
+    )
+
+
+def discover_wordpress_schedule_sessions(page: dict[str, str]) -> list[dict[str, str]]:
+    text = f"{page.get('slug', '')} {page.get('title', '')}".lower()
+    if not any(keyword in text for keyword in ("schedule", "agenda", "program", "programme")):
+        return []
+    seen: set[str] = set()
+    sessions: list[dict[str, str]] = []
+    for item in elementor_widget_texts(page.get("content", "")):
+        title = readable_text(item)
+        if not schedule_text_is_session_title(title):
+            continue
+        key = title.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        sessions.append(
+            {
+                "title": title,
+                "session_url": f"{page['link']}#{slugify(title)}",
+                "abstract": title,
+            }
+        )
+    return sessions
+
+
 def crawl_wordpress(
     conn: sqlite3.Connection,
     site_url: str,
@@ -1097,6 +1184,23 @@ def crawl_wordpress(
         if not candidate:
             continue
         candidate_pages += 1
+        if not assets:
+            schedule_sessions = discover_wordpress_schedule_sessions(page)
+            if schedule_sessions:
+                for session in schedule_sessions:
+                    session_id = upsert_session(
+                        conn,
+                        event_id,
+                        session["title"],
+                        session_url=session["session_url"],
+                        asset_status="missing",
+                        abstract=session.get("abstract", ""),
+                    )
+                    mark_session_checked(conn, session_id, "missing")
+                    missing += 1
+                    messages.append(f"WAIT {session['title']}: no slides yet")
+                continue
+
         session_id = upsert_session(
             conn,
             event_id,
