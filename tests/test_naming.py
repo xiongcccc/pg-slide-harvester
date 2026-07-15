@@ -90,6 +90,21 @@ class NamingTests(unittest.TestCase):
             "community",
         )
 
+    def test_russian_event_uses_non_english_archive_root(self):
+        self.assertEqual(
+            pgppt.asset_language_slug(
+                "PG BootCamp Russia 2026",
+                "Archive of the future",
+                "Archive of the future",
+                "https://raw.githubusercontent.com/PGBootCamp/Russia_2026/main/T1-L1.pdf",
+            ),
+            "russian",
+        )
+        self.assertEqual(
+            pgppt.archive_asset_dir("backup-recovery", "russian"),
+            pgppt.ROOT / "archive/non-english/russian/backup-recovery",
+        )
+
     def test_upsert_session_can_backfill_abstract(self):
         conn = memory_conn(self)
         pgppt.init_db(conn)
@@ -231,7 +246,10 @@ class NamingTests(unittest.TestCase):
                     row["file_url"],
                     "https://raw.githubusercontent.com/PGBootCamp/Russia_2026/main/T1-L1 - Archive of the future.pdf",
                 )
-                self.assertEqual(row["local_path"], "archive/backup-recovery/Download presentation.pdf")
+                self.assertEqual(
+                    row["local_path"],
+                    "archive/non-english/russian/backup-recovery/Download presentation.pdf",
+                )
         finally:
             pgppt.ROOT = original_root
             pgppt.request_url = original_request_url
@@ -401,6 +419,59 @@ class NamingTests(unittest.TestCase):
                 )
                 self.assertTrue((pgppt.ROOT / row["local_path"]).exists())
                 self.assertTrue(any("MOVE archive/uncategorized/Directory Tree" in msg for msg in messages))
+        finally:
+            pgppt.ROOT = original_root
+
+    def test_organize_archive_moves_russian_event_to_non_english_tree(self):
+        original_root = pgppt.ROOT
+
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                pgppt.ROOT = Path(tmp)
+                old_path = pgppt.ROOT / "archive/backup-recovery/T1 L1 Borodin Archive of the future.pdf"
+                old_path.parent.mkdir(parents=True)
+                old_path.write_bytes(b"%PDF-1.4 russian event\n")
+
+                conn = memory_conn(self)
+                pgppt.init_db(conn)
+                pgppt.ensure_tags(conn)
+                event_id = pgppt.upsert_event(conn, "PG BootCamp Russia 2026 Moscow")
+                session_id = pgppt.upsert_session(
+                    conn,
+                    event_id,
+                    "Archive of the future",
+                    abstract="PostgreSQL backup archive and recovery practices.",
+                )
+                conn.execute(
+                    """
+                    insert into assets(
+                        session_id, file_url, local_path, file_type, sha256,
+                        size_bytes, downloaded_at, created_at
+                    )
+                    values(?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        session_id,
+                        "https://raw.githubusercontent.com/PGBootCamp/Russia_2026/main/T1-L1%20-%20Archive%20of%20the%20future.pdf",
+                        "archive/backup-recovery/T1 L1 Borodin Archive of the future.pdf",
+                        "pdf",
+                        "russiansha",
+                        old_path.stat().st_size,
+                        pgppt.utcnow(),
+                        pgppt.utcnow(),
+                    ),
+                )
+                conn.commit()
+
+                messages = pgppt.organize_archive_by_topic(conn)
+
+                row = conn.execute("select local_path from assets").fetchone()
+                self.assertEqual(
+                    row["local_path"],
+                    "archive/non-english/russian/backup-recovery/T1 L1 Borodin Archive of the future.pdf",
+                )
+                self.assertTrue((pgppt.ROOT / row["local_path"]).exists(), messages)
+                self.assertFalse(old_path.exists())
         finally:
             pgppt.ROOT = original_root
 

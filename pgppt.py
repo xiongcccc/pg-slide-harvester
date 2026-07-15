@@ -120,6 +120,7 @@ TITLE_NOISE_PATTERNS = (
     "elephant icon",
 )
 UNCATEGORIZED_TOPIC = "uncategorized"
+NON_ENGLISH_ARCHIVE_ROOT = "non-english"
 BLOCK_TEXT_TAGS = {"p", "li", "h1", "h2", "h3"}
 ACTIVE_RUN_ID: int | None = None
 
@@ -605,8 +606,69 @@ def guess_extension(url: str, content_type: str | None = None) -> str:
     return ".bin"
 
 
-def safe_topic_dir(topic_slug: str) -> Path:
-    return ROOT / "archive" / slugify(topic_slug, UNCATEGORIZED_TOPIC)
+def archive_asset_dir(topic_slug: str, language_slug: str | None = None) -> Path:
+    topic = slugify(topic_slug, UNCATEGORIZED_TOPIC)
+    if language_slug:
+        language = slugify(language_slug, language_slug)
+        return ROOT / "archive" / NON_ENGLISH_ARCHIVE_ROOT / language / topic
+    return ROOT / "archive" / topic
+
+
+def contains_range(value: str, ranges: Iterable[tuple[int, int]]) -> bool:
+    return any(start <= ord(char) <= end for char in value for start, end in ranges)
+
+
+def non_english_language_slug(parts: Iterable[str]) -> str | None:
+    text = " ".join(readable_text(part) for part in parts if part)
+    lowered = text.lower()
+    if not lowered:
+        return None
+    if contains_range(text, ((0x4E00, 0x9FFF),)):
+        return "chinese"
+    if contains_range(text, ((0x3040, 0x30FF),)):
+        return "japanese"
+    if contains_range(text, ((0xAC00, 0xD7AF),)):
+        return "korean"
+    if contains_range(text, ((0x0400, 0x04FF), (0x0500, 0x052F))):
+        return "russian"
+    if contains_range(text, ((0x0600, 0x06FF),)):
+        return "arabic"
+    if contains_range(text, ((0x0370, 0x03FF),)):
+        return "greek"
+    if contains_range(text, ((0x0590, 0x05FF),)):
+        return "hebrew"
+
+    keyword_groups = (
+        ("russian", ("russia", "russian", "moscow", "piter", "saint petersburg", "pgbootcamp/russia")),
+        ("japanese", ("japan", "japanese", "tokyo", "postgresql conference japan")),
+        ("chinese", ("china", "chinese", "beijing", "shanghai", "taiwan", "hong kong")),
+        ("korean", ("korea", "korean", "seoul")),
+        ("spanish", ("spanish", "espanol", "español", "spain", "latam")),
+        ("french", ("french", "france", "francais", "français")),
+        ("german", ("german", "deutsch", "germany")),
+        ("portuguese", ("portuguese", "portugues", "português", "brasil", "brazil")),
+    )
+    for slug, keywords in keyword_groups:
+        if any(keyword in lowered for keyword in keywords):
+            return slug
+    return None
+
+
+def asset_language_slug(
+    event_name: str | None,
+    session_title: str | None,
+    asset_title: str | None,
+    file_url: str | None,
+) -> str | None:
+    return non_english_language_slug(
+        [
+            event_name or "",
+            session_title or "",
+            asset_title or "",
+            unquote(urlparse(file_url or "").path),
+            file_url or "",
+        ]
+    )
 
 
 def primary_topic_slug(conn: sqlite3.Connection, session_id: int) -> str:
@@ -759,7 +821,9 @@ def download_asset(
             ext = guess_extension(url, content_type)
             if ext.lower() not in ASSET_EXTENSIONS and "pdf" not in content_type.lower():
                 return False, f"skipped non-slide asset content-type={content_type}"
-            topic_dir = safe_topic_dir(asset_topic_slug(conn, session_id, session_title, url))
+            topic_slug = asset_topic_slug(conn, session_id, session_title, url)
+            language_slug = asset_language_slug(event_name, session_title, session_title, url)
+            topic_dir = archive_asset_dir(topic_slug, language_slug)
             topic_dir.mkdir(parents=True, exist_ok=True)
             filename_stem = safe_filename_stem(session_title)
             dest = unique_asset_path(topic_dir, filename_stem, ext)
@@ -2233,9 +2297,11 @@ def organize_archive_by_topic(conn: sqlite3.Connection) -> list[str]:
             a.local_path,
             a.file_url,
             s.id as session_id,
-            s.title as session_title
+            s.title as session_title,
+            e.name as event_name
         from assets a
         join sessions s on s.id = a.session_id
+        join events e on e.id = s.event_id
         order by a.downloaded_at
         """
     ).fetchall()
@@ -2251,7 +2317,8 @@ def organize_archive_by_topic(conn: sqlite3.Connection) -> list[str]:
             continue
         stem = preferred_asset_stem(row["local_path"], row["file_url"], row["session_title"])
         topic_slug = asset_topic_slug(conn, int(row["session_id"]), stem, row["file_url"])
-        topic_dir = safe_topic_dir(topic_slug)
+        language_slug = asset_language_slug(row["event_name"], row["session_title"], stem, row["file_url"])
+        topic_dir = archive_asset_dir(topic_slug, language_slug)
         topic_dir.mkdir(parents=True, exist_ok=True)
         preferred_dest = topic_dir / f"{stem}{src.suffix}"
         if src.resolve() == preferred_dest.resolve():
