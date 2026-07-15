@@ -26,7 +26,7 @@
   <img alt="Python" src="https://img.shields.io/badge/python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square">
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-slides-336791?style=flat-square&logo=postgresql&logoColor=white">
-  <img alt="Dependencies" src="https://img.shields.io/badge/dependencies-stdlib_only-0F766E?style=flat-square">
+  <img alt="Dependencies" src="https://img.shields.io/badge/python-stdlib%20%2B%20optional%20curl-0F766E?style=flat-square">
 </p>
 
 ---
@@ -56,7 +56,8 @@ published, downloading files one by one, and renaming cryptic filenames by hand.
 - Re-check sessions whose materials are published later.
 - Generate local HTML and CSV reports.
 - Generate one dated run report for each download command.
-- Use only the Python standard library.
+- Use only the Python standard library, with an optional `curl` fallback for sites
+  that do not behave well with Python's built-in HTTPS client.
 
 ### Supported Sources
 
@@ -300,7 +301,8 @@ PostgreSQL 生态会议中的公开 PPT/PDF 资料。它会从 PostgreSQL 官方
 - 对暂未发布资料的 session 进行记录，后续可以继续补抓。
 - 生成本地 HTML/CSV 报告。
 - 每次下载命令都会生成一份按日期保存的运行报告。
-- 只使用 Python 标准库。
+- Python 依赖仅使用标准库；如果系统存在 `curl`，会在少数 HTTPS 站点对
+  Python 内置客户端不友好时作为兜底。
 
 ### 当前支持的来源
 

@@ -37,10 +37,12 @@ class AdapterTests(unittest.TestCase):
         original_sleep = pgppt.time.sleep
         old_timeout = os.environ.get("PGSH_REQUEST_TIMEOUT")
         old_retries = os.environ.get("PGSH_REQUEST_RETRIES")
+        old_curl_fallback = os.environ.get("PGSH_CURL_FALLBACK")
         calls = []
         try:
             os.environ["PGSH_REQUEST_TIMEOUT"] = "7"
             os.environ["PGSH_REQUEST_RETRIES"] = "2"
+            os.environ["PGSH_CURL_FALLBACK"] = "0"
             pgppt.time.sleep = lambda seconds: None
 
             def fake_urlopen(req, timeout):
@@ -64,6 +66,87 @@ class AdapterTests(unittest.TestCase):
                 os.environ.pop("PGSH_REQUEST_RETRIES", None)
             else:
                 os.environ["PGSH_REQUEST_RETRIES"] = old_retries
+            if old_curl_fallback is None:
+                os.environ.pop("PGSH_CURL_FALLBACK", None)
+            else:
+                os.environ["PGSH_CURL_FALLBACK"] = old_curl_fallback
+
+    def test_request_url_wraps_wall_timeout_as_url_error(self):
+        original_urlopen = pgppt.urlopen
+        original_sleep = pgppt.time.sleep
+        old_timeout = os.environ.get("PGSH_REQUEST_TIMEOUT")
+        old_retries = os.environ.get("PGSH_REQUEST_RETRIES")
+        old_curl_fallback = os.environ.get("PGSH_CURL_FALLBACK")
+        try:
+            os.environ["PGSH_REQUEST_TIMEOUT"] = "1"
+            os.environ["PGSH_REQUEST_RETRIES"] = "1"
+            os.environ["PGSH_CURL_FALLBACK"] = "0"
+            pgppt.time.sleep = lambda seconds: None
+
+            def fake_urlopen(req, timeout):  # noqa: ARG001
+                raise TimeoutError("stalled handshake")
+
+            pgppt.urlopen = fake_urlopen
+
+            with self.assertRaises(URLError):
+                pgppt.request_url("https://example.com/stalled")
+        finally:
+            pgppt.urlopen = original_urlopen
+            pgppt.time.sleep = original_sleep
+            if old_timeout is None:
+                os.environ.pop("PGSH_REQUEST_TIMEOUT", None)
+            else:
+                os.environ["PGSH_REQUEST_TIMEOUT"] = old_timeout
+            if old_retries is None:
+                os.environ.pop("PGSH_REQUEST_RETRIES", None)
+            else:
+                os.environ["PGSH_REQUEST_RETRIES"] = old_retries
+            if old_curl_fallback is None:
+                os.environ.pop("PGSH_CURL_FALLBACK", None)
+            else:
+                os.environ["PGSH_CURL_FALLBACK"] = old_curl_fallback
+
+    def test_request_url_can_fall_back_to_curl(self):
+        original_urlopen = pgppt.urlopen
+        original_run = pgppt.subprocess.run
+        old_timeout = os.environ.get("PGSH_REQUEST_TIMEOUT")
+        old_retries = os.environ.get("PGSH_REQUEST_RETRIES")
+        old_curl_fallback = os.environ.get("PGSH_CURL_FALLBACK")
+        try:
+            os.environ["PGSH_REQUEST_TIMEOUT"] = "3"
+            os.environ["PGSH_REQUEST_RETRIES"] = "1"
+            os.environ.pop("PGSH_CURL_FALLBACK", None)
+
+            def fake_urlopen(req, timeout):  # noqa: ARG001
+                raise URLError("urllib ssl eof")
+
+            def fake_run(cmd, text, capture_output, timeout):  # noqa: ARG001
+                header_path = Path(cmd[cmd.index("--dump-header") + 1])
+                body_path = Path(cmd[cmd.index("--output") + 1])
+                header_path.write_text("HTTP/2 200\\r\\ncontent-type: text/html\\r\\n\\r\\n", encoding="utf-8")
+                body_path.write_bytes(b"<html>ok</html>")
+                return pgppt.subprocess.CompletedProcess(cmd, 0, "", "")
+
+            pgppt.urlopen = fake_urlopen
+            pgppt.subprocess.run = fake_run
+
+            with pgppt.request_url("https://example.com/fallback") as resp:
+                self.assertEqual(resp.read(), b"<html>ok</html>")
+        finally:
+            pgppt.urlopen = original_urlopen
+            pgppt.subprocess.run = original_run
+            if old_timeout is None:
+                os.environ.pop("PGSH_REQUEST_TIMEOUT", None)
+            else:
+                os.environ["PGSH_REQUEST_TIMEOUT"] = old_timeout
+            if old_retries is None:
+                os.environ.pop("PGSH_REQUEST_RETRIES", None)
+            else:
+                os.environ["PGSH_REQUEST_RETRIES"] = old_retries
+            if old_curl_fallback is None:
+                os.environ.pop("PGSH_CURL_FALLBACK", None)
+            else:
+                os.environ["PGSH_CURL_FALLBACK"] = old_curl_fallback
 
     def test_pgconfdev_official_name_infers_pgevents_sessions_url(self):
         self.assertEqual(
@@ -73,6 +156,38 @@ class AdapterTests(unittest.TestCase):
                 "inferred pgconf.dev sessions",
             )],
         )
+
+    def test_posette_name_infers_schedule_url(self):
+        self.assertEqual(
+            pgppt.inferred_event_adapter_links("POSETTE: An Event for Postgres 2026"),
+            [(
+                "https://posetteconf.com/2026/schedule/",
+                "inferred POSETTE schedule",
+            )],
+        )
+
+    def test_discover_posette_sessions_from_schedule(self):
+        original_request_url = pgppt.request_url
+        try:
+            html = b"""
+            <html><body>
+              <a href="/2026/talks/json-in-postgresql/">JSON in PostgreSQL</a>
+              <a href="/2026/speakers/someone/">Speaker</a>
+              <a href="https://www.youtube.com/watch?v=abc">play icon</a>
+            </body></html>
+            """
+            pgppt.request_url = lambda url: FakeResponse(html, "text/html")
+
+            self.assertEqual(
+                pgppt.posette_schedule_url("https://posetteconf.com/2026/conduct/"),
+                "https://posetteconf.com/2026/schedule/",
+            )
+            self.assertEqual(
+                pgppt.discover_posette_sessions("https://posetteconf.com/2026/schedule/"),
+                [("https://posetteconf.com/2026/talks/json-in-postgresql/", "JSON in PostgreSQL")],
+            )
+        finally:
+            pgppt.request_url = original_request_url
 
     def test_eventyay_event_url_can_be_discovered_from_sponsorship_page(self):
         original_request_url = pgppt.request_url
@@ -232,6 +347,34 @@ class AdapterTests(unittest.TestCase):
             self.assertEqual(sessions[0][1], "Zero-Downtime Upgrades: PostgreSQL and OS/glibc at Global Scale")
         finally:
             pgppt.request_url = original_request_url
+
+    def test_postgresql_eu_schedule_scan_failure_is_reported(self):
+        original_discover = pgppt.discover_postgresql_eu_sessions
+        try:
+            pgppt.discover_postgresql_eu_sessions = lambda url: (_ for _ in ()).throw(URLError("ssl eof"))
+            conn = memory_conn(self)
+            pgppt.init_db(conn)
+
+            messages = pgppt.crawl_postgresql_eu(conn, "https://www.postgresql.eu/events/fosdem2025/schedule/")
+
+            self.assertIn("ERROR postgresql.eu schedule scan failed: <urlopen error ssl eof>", messages)
+            self.assertIn("summary: downloaded=0, skipped=0, missing=0, failed=1", messages)
+        finally:
+            pgppt.discover_postgresql_eu_sessions = original_discover
+
+    def test_generic_crawl_skips_social_and_forms_hosts(self):
+        self.assertFalse(pgppt.generic_crawl_allowed("https://www.linkedin.com/groups/14216001/"))
+        self.assertFalse(pgppt.generic_crawl_allowed("https://bsky.app/profile/nordicpgday.org"))
+        self.assertFalse(
+            pgppt.generic_crawl_allowed(
+                "https://docs.google.com/forms/d/e/1FAIpQLSeuFilhzd/viewform"
+            )
+        )
+        self.assertTrue(
+            pgppt.generic_crawl_allowed(
+                "https://docs.google.com/presentation/d/1kNGb-4ejOxmiVdi-y9VK1I8gSCwzm235/edit"
+            )
+        )
 
 
 class ReportTests(unittest.TestCase):

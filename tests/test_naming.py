@@ -59,6 +59,18 @@ class NamingTests(unittest.TestCase):
         )
         self.assertEqual(title, "PostgreSQL Backup Patterns - Demo Notes")
 
+    def test_asset_title_ignores_url_like_label(self):
+        title = pgppt.asset_title_from_context(
+            "From Queries to Pints: Building a Beer Recommendation System with pgvector",
+            "https://fosdem.org/2025/events/attachments/slides/238549/2025_PGVE_x86FgXC.pdf",
+            "https://fosdem.org/2025/events/attachments/slides/238549/2025_PGVE_x86FgXC.pdf",
+            2,
+        )
+        self.assertEqual(
+            title,
+            "From Queries to Pints: Building a Beer Recommendation System with pgvector",
+        )
+
     def test_book_of_abstracts_is_not_treated_as_slide_asset(self):
         self.assertFalse(
             pgppt.is_probably_slide_asset(
@@ -70,6 +82,12 @@ class NamingTests(unittest.TestCase):
             pgppt.is_probably_slide_asset(
                 "https://indico.example.org/event/1/contributions/2/slides.pdf",
                 "Slides",
+            )
+        )
+        self.assertFalse(
+            pgppt.is_probably_slide_asset(
+                "https://example.org/how2026-ppt-template-EN.pptx",
+                "HOW2026 template",
             )
         )
 
@@ -323,6 +341,18 @@ class NamingTests(unittest.TestCase):
             (session_id,),
         ).fetchall()
         self.assertIn("internals", [row["slug"] for row in rows])
+
+    def test_preferred_asset_stem_uses_session_title_when_local_name_contains_url(self):
+        stem = pgppt.preferred_asset_stem(
+            "archive/extensions-ecosystem/From Queries to Pints - https fosdem.org 2025 events attachments.pdf",
+            "https://fosdem.org/2025/events/attachments/slides/238549/2025_PGVE_x86FgXC.pdf",
+            "From Queries to Pints: Building a Beer Recommendation System with pgvector",
+        )
+
+        self.assertEqual(
+            stem,
+            "From Queries to Pints Building a Beer Recommendation System with pgvector",
+        )
 
     def test_organize_archive_flattens_topic_directory_and_normalizes_filename(self):
         original_root = pgppt.ROOT

@@ -7,15 +7,20 @@ import datetime as dt
 import hashlib
 import html
 from html.parser import HTMLParser
+import io
 import json
 import mimetypes
 import os
 from pathlib import Path
 import re
 import shutil
+import signal
+import socket
 import sqlite3
+import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
 from typing import Iterable
@@ -51,6 +56,7 @@ NON_SLIDE_ASSET_KEYWORDS = {
     "registration",
     "cfp",
     "call-for",
+    "template",
     "book-of-abstracts",
     "abstracts",
     "code-of-conduct",
@@ -70,6 +76,14 @@ DISCOVERY_PAGE_KEYWORDS = {
     "presentation",
     "presentations",
     "slides",
+}
+BLOCKED_GENERIC_HOSTS = {
+    "bsky.app",
+    "facebook.com",
+    "linkedin.com",
+    "mastodon.social",
+    "twitter.com",
+    "x.com",
 }
 WINDOWS_RESERVED_FILENAMES = {
     "CON",
@@ -174,6 +188,11 @@ def title_has_noise(value: str) -> bool:
     return any(pattern in lowered for pattern in TITLE_NOISE_PATTERNS)
 
 
+def title_has_url_noise(value: str) -> bool:
+    lowered = value.lower()
+    return "://" in lowered or bool(re.search(r"\bhttps?\b|\bwww\b", lowered))
+
+
 def normalized_asset_url(url: str) -> str:
     parsed = urlparse(url)
     if parsed.netloc.lower() == "github.com":
@@ -195,10 +214,15 @@ def asset_title_from_context(base_title: str, label: str, asset_url: str, asset_
         return base
 
     label_text = readable_text(label)
+    label_is_url_noise = title_has_url_noise(label_text)
+    if label_is_url_noise:
+        label_text = ""
     inferred = readable_text(infer_session_title(asset_url))
     if base_lower in GENERIC_ASSET_LABELS or title_has_noise(base):
         return inferred or label_text or base
     extra = label_text
+    if label_is_url_noise:
+        return base
     if not extra or extra.lower() in GENERIC_ASSET_LABELS:
         extra = inferred
     if not extra or extra.lower() == base.lower() or extra.lower() in base.lower():
@@ -573,6 +597,97 @@ def configured_positive_int(name: str, default: int) -> int:
     return max(1, parsed)
 
 
+class BufferedResponse(io.BytesIO):
+    def __init__(self, body: bytes, headers: dict[str, str]):
+        super().__init__(body)
+        self.headers = headers
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+        self.close()
+
+
+def curl_fallback_response(url: str, timeout: int, headers: dict[str, str]):
+    if os.environ.get("PGSH_CURL_FALLBACK", "1") == "0":
+        raise URLError("curl fallback disabled")
+    header_path: Path | None = None
+    body_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False) as header_file:
+            header_path = Path(header_file.name)
+        with tempfile.NamedTemporaryFile(delete=False) as body_file:
+            body_path = Path(body_file.name)
+        cmd = [
+            "curl",
+            "-L",
+            "--silent",
+            "--show-error",
+            "--max-time",
+            str(timeout),
+            "--user-agent",
+            headers.get("User-Agent", "pgppt-harvester/0.1"),
+            "--dump-header",
+            str(header_path),
+            "--output",
+            str(body_path),
+            url,
+        ]
+        completed = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout + 3)
+        if completed.returncode != 0:
+            raise URLError(completed.stderr.strip() or f"curl exited {completed.returncode}")
+        header_text = header_path.read_text(encoding="iso-8859-1", errors="replace")
+        header_blocks = [block for block in re.split(r"\r?\n\r?\n", header_text) if block.strip()]
+        response_headers: dict[str, str] = {}
+        if header_blocks:
+            for line in header_blocks[-1].splitlines()[1:]:
+                if ":" in line:
+                    key, value = line.split(":", 1)
+                    response_headers[key.strip()] = value.strip()
+        return BufferedResponse(body_path.read_bytes(), response_headers)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise URLError(f"curl fallback failed: {exc}") from exc
+    finally:
+        if header_path:
+            header_path.unlink(missing_ok=True)
+        if body_path:
+            body_path.unlink(missing_ok=True)
+
+
+def open_with_wall_timeout(req: Request, timeout: int):
+    old_socket_timeout = socket.getdefaulttimeout()
+    if (
+        hasattr(signal, "SIGALRM")
+        and hasattr(signal, "setitimer")
+        and threading.current_thread() is threading.main_thread()
+    ):
+        old_handler = signal.getsignal(signal.SIGALRM)
+        old_timer = signal.getitimer(signal.ITIMER_REAL)
+
+        def timeout_handler(signum, frame):  # noqa: ARG001
+            raise TimeoutError(f"request timed out after {timeout}s")
+
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.setitimer(signal.ITIMER_REAL, timeout + 2)
+        socket.setdefaulttimeout(timeout)
+        try:
+            return urlopen(req, timeout=timeout)
+        except TimeoutError as exc:
+            raise URLError(str(exc)) from exc
+        finally:
+            socket.setdefaulttimeout(old_socket_timeout)
+            signal.setitimer(signal.ITIMER_REAL, *old_timer)
+            signal.signal(signal.SIGALRM, old_handler)
+    try:
+        socket.setdefaulttimeout(timeout)
+        return urlopen(req, timeout=timeout)
+    except TimeoutError as exc:
+        raise URLError(str(exc)) from exc
+    finally:
+        socket.setdefaulttimeout(old_socket_timeout)
+
+
 def request_url(url: str, timeout: int | None = None, retries: int | None = None):
     timeout = timeout if timeout is not None else configured_positive_int("PGSH_REQUEST_TIMEOUT", 15)
     retries = retries if retries is not None else configured_positive_int("PGSH_REQUEST_RETRIES", 2)
@@ -581,18 +696,33 @@ def request_url(url: str, timeout: int | None = None, retries: int | None = None
     parsed = urlparse(url)
     safe_path = quote(parsed.path, safe="/%:@&=+$,;~")
     safe_url = parsed._replace(path=safe_path).geturl()
+    if parsed.netloc.lower().endswith("posetteconf.com"):
+        try:
+            return curl_fallback_response(safe_url, timeout, headers)
+        except URLError:
+            pass
     last_error = None
     for attempt in range(retries):
         req = Request(safe_url, headers=headers)
         try:
-            return urlopen(req, timeout=timeout)
+            return open_with_wall_timeout(req, timeout)
         except URLError as exc:
             last_error = exc
             if attempt + 1 < retries:
                 time.sleep(1)
     if last_error:
+        try:
+            return curl_fallback_response(safe_url, timeout, headers)
+        except URLError:
+            pass
         raise last_error
-    return urlopen(Request(safe_url, headers=headers), timeout=timeout)
+    try:
+        return open_with_wall_timeout(Request(safe_url, headers=headers), timeout)
+    except URLError as exc:
+        try:
+            return curl_fallback_response(safe_url, timeout, headers)
+        except URLError:
+            raise exc
 
 
 def guess_extension(url: str, content_type: str | None = None) -> str:
@@ -736,7 +866,7 @@ def unique_asset_path(dest_dir: Path, filename_stem: str, ext: str) -> Path:
 
 def generic_title(value: str) -> bool:
     normalized = readable_text(value).lower()
-    return normalized in GENERIC_ASSET_LABELS or title_has_noise(normalized)
+    return normalized in GENERIC_ASSET_LABELS or title_has_noise(normalized) or title_has_url_noise(normalized)
 
 
 def preferred_asset_stem(local_path: str, file_url: str, session_title: str) -> str:
@@ -746,9 +876,9 @@ def preferred_asset_stem(local_path: str, file_url: str, session_title: str) -> 
 
     if local_stem.lower().startswith("directory tree - "):
         return safe_filename_stem(local_stem.split(" - ", 1)[1], fallback=local_stem)
+    if generic_title(local_stem) and session_stem:
+        return session_stem
     if generic_title(local_stem) and inferred:
-        return inferred
-    if title_has_noise(local_stem) and inferred:
         return inferred
     if session_stem.lower() in GENERIC_ASSET_LABELS and inferred:
         return inferred
@@ -1473,6 +1603,16 @@ def link_looks_relevant(url: str, label: str = "") -> bool:
     return any(keyword in text for keyword in DISCOVERY_PAGE_KEYWORDS) or is_probably_slide_asset(url, label)
 
 
+def generic_crawl_allowed(url: str) -> bool:
+    parsed = urlparse(url)
+    host = parsed.netloc.lower().removeprefix("www.")
+    if host in BLOCKED_GENERIC_HOSTS:
+        return False
+    if host == "docs.google.com" and not parsed.path.startswith("/presentation/"):
+        return False
+    return True
+
+
 def crawl_generic_site(
     conn: sqlite3.Connection,
     site_url: str,
@@ -1484,6 +1624,8 @@ def crawl_generic_site(
     event = event_name or infer_event_name(site_url)
     event_id = upsert_event(conn, event, source_url=site_url, website_url=site_url)
     parsed_site = urlparse(site_url)
+    if parsed_site.netloc.lower().endswith("posetteconf.com") and max_pages == 25:
+        max_pages = 80
     root = f"{parsed_site.scheme}://{parsed_site.netloc}"
     queue = [site_url]
     seen: set[str] = set()
@@ -1667,7 +1809,14 @@ def crawl_postgresql_eu(
 ) -> list[str]:
     event = event_name or infer_event_name(schedule_url)
     event_id = upsert_event(conn, event, source_url=schedule_url, website_url=schedule_url)
-    discovered = discover_postgresql_eu_sessions(schedule_url)
+    try:
+        discovered = discover_postgresql_eu_sessions(schedule_url)
+    except Exception as exc:  # noqa: BLE001
+        return [
+            f"ERROR postgresql.eu schedule scan failed: {exc}",
+            "discovered postgresql.eu sessions: 0",
+            "summary: downloaded=0, skipped=0, missing=0, failed=1",
+        ]
     if limit is not None:
         discovered = discovered[:limit]
 
@@ -1981,6 +2130,104 @@ def postgresql_eu_schedule_url(url: str) -> str | None:
     return None
 
 
+def posette_schedule_url(url: str) -> str | None:
+    parsed = urlparse(url)
+    if not parsed.netloc.lower().endswith("posetteconf.com"):
+        return None
+    match = re.match(r"^/(20\d{2})(?:/|$)", parsed.path)
+    if not match:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}/{match.group(1)}/schedule/"
+
+
+def discover_posette_sessions(schedule_url: str) -> list[tuple[str, str]]:
+    parsed_schedule = urlparse(schedule_url)
+    links = extract_links(schedule_url)
+    seen: set[str] = set()
+    sessions: list[tuple[str, str]] = []
+    for url, label in links:
+        parsed = urlparse(url)
+        if parsed.netloc != parsed_schedule.netloc:
+            continue
+        if not re.search(r"/20\d{2}/talks/[^/]+/?$", parsed.path):
+            continue
+        normalized = parsed._replace(query="", fragment="").geturl()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        title = readable_text(label) or infer_session_title(normalized)
+        if generic_title(title):
+            title = infer_session_title(normalized)
+        sessions.append((normalized, title))
+    return sessions
+
+
+def crawl_posette(
+    conn: sqlite3.Connection,
+    schedule_url: str,
+    event_name: str | None = None,
+    delay_seconds: float = 0.5,
+    limit: int | None = None,
+) -> list[str]:
+    event = event_name or infer_event_name(schedule_url)
+    event_id = upsert_event(conn, event, source_url=schedule_url, website_url=schedule_url)
+    try:
+        discovered = discover_posette_sessions(schedule_url)
+    except Exception as exc:  # noqa: BLE001
+        return [
+            f"ERROR POSETTE schedule scan failed: {exc}",
+            "discovered POSETTE sessions: 0",
+            "summary: downloaded=0, skipped=0, missing=0, failed=1",
+        ]
+    if limit is not None:
+        discovered = discovered[:limit]
+
+    messages = [f"discovered POSETTE sessions: {len(discovered)}"]
+    downloaded = 0
+    skipped = 0
+    missing = 0
+    failed = 0
+    for session_url, title in discovered:
+        session_id = upsert_session(conn, event_id, title, session_url=session_url, asset_status="missing")
+        try:
+            page_info = extract_page_info(session_url)
+            page_title = title
+            session_id = upsert_session(
+                conn,
+                event_id,
+                page_title,
+                session_url=session_url,
+                asset_status="missing",
+                abstract=str(page_info["abstract"] or ""),
+            )
+            assets = [(url, label) for url, label in page_info["links"] if is_probably_slide_asset(url, label)]
+        except Exception as exc:  # noqa: BLE001
+            mark_session_checked(conn, session_id, "failed")
+            failed += 1
+            messages.append(f"ERROR {title}: {exc}")
+            continue
+        if not assets:
+            mark_session_checked(conn, session_id, "missing")
+            missing += 1
+            messages.append(f"WAIT {page_title}: no slides yet")
+            continue
+        for asset_url, label in assets:
+            asset_title = asset_title_from_context(page_title, label, asset_url, len(assets))
+            ok, msg = download_asset(conn, session_id, asset_url, event, asset_title)
+            if ok:
+                downloaded += 1
+                messages.append(f"OK {page_title}: {msg}")
+            else:
+                skipped += 1
+                messages.append(f"SKIP {page_title}: {msg}")
+        if delay_seconds:
+            time.sleep(delay_seconds)
+    messages.append(
+        f"summary: downloaded={downloaded}, skipped={skipped}, missing={missing}, failed={failed}"
+    )
+    return messages
+
+
 def classify_adapter_url(url: str) -> str:
     parsed = urlparse(url)
     host = parsed.netloc.lower()
@@ -2092,6 +2339,9 @@ def inferred_event_adapter_links(event_name: str) -> list[tuple[str, str]]:
     if year_match and "pgconf.dev" in normalized:
         year = year_match.group(1)
         links.append((f"https://www.pgevents.ca/events/pgconfdev{year}/sessions/", "inferred pgconf.dev sessions"))
+    if year_match and "posette" in normalized:
+        year = year_match.group(1)
+        links.append((f"https://posetteconf.com/{year}/schedule/", "inferred POSETTE schedule"))
     return links
 
 
@@ -2154,6 +2404,16 @@ def download_event_by_name(
         if pgeu_schedule_url and pgeu_schedule_url in seen_targets:
             continue
 
+        posette_url = posette_schedule_url(url)
+        if posette_url and posette_url not in seen_targets:
+            seen_targets.add(posette_url)
+            ran_adapter = True
+            messages.append(f"adapter: posette ({label or url}) -> {posette_url}")
+            messages.extend(crawl_posette(conn, posette_url, event_name, delay_seconds, limit))
+            continue
+        if posette_url and posette_url in seen_targets:
+            continue
+
         eventyay_url = eventyay_event_url(url)
         if eventyay_url and eventyay_url not in seen_targets:
             seen_targets.add(eventyay_url)
@@ -2173,6 +2433,9 @@ def download_event_by_name(
 
         parsed = urlparse(url)
         if parsed.scheme.startswith("http") and parsed.netloc not in {"www.postgresql.org", "postgresql.org"} and url not in seen_targets:
+            if not generic_crawl_allowed(url):
+                messages.append(f"SKIP generic unsupported ({label or url}) -> {url}")
+                continue
             seen_targets.add(url)
             ran_adapter = True
             messages.append(f"adapter: generic ({label or url}) -> {url}")
